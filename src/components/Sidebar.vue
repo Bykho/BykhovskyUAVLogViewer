@@ -18,6 +18,9 @@
                 <!-- Plot -->
                 <a :class="selected === 'plot' ? 'selected' : ''" @click="selected='plot'"
                    v-if="state.processDone"> <i class="fas fa-chart-line"></i>Plot</a>
+                <!-- Chat -->
+                <a :class="selected === 'chat' ? 'selected' : ''" @click="selected='chat'"
+                   v-if="state.processDone"> <i class="fas fa-comments"></i>Chat</a>
                 <!-- more -->
                 <a :class="selected ==='other' ? 'selected' : ''" @click="selected='other'" v-if="state.processDone">
                     <i class="fas fa-ellipsis-v"></i>
@@ -31,6 +34,9 @@
                 <div :style="{display: selected==='plot' ? '' : 'none' }">
                     <plotSetup/>
                     <message-menu/>
+                </div>
+                <div v-if="selected==='chat'" style="height: 400px;">
+                    <ChatPanel/>
                 </div>
                 <div v-if="selected==='home'">
                     <Dropzone/>
@@ -133,6 +139,7 @@ import Dropzone from './SideBarFileManager.vue'
 import MessageMenu from './SideBarMessageMenu.vue'
 import {store} from './Globals.js'
 import PlotSetup from './PlotSetup.vue'
+import ChatPanel from './ChatPanel.vue'
 
 export default {
     name: 'sidebar',
@@ -225,7 +232,7 @@ export default {
             this.downloadURL = URL.createObjectURL(this.blob)
         }
     },
-    components: {PlotSetup, MessageMenu, Dropzone}
+    components: {PlotSetup, MessageMenu, Dropzone, ChatPanel}
 }
 </script>
 <style scoped>

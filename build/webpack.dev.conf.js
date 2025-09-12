@@ -1,5 +1,12 @@
 'use strict'
 
+// Load environment variables from .env file
+require('dotenv').config()
+
+// Debug: Check if environment variable is loaded
+console.log('Webpack - VUE_APP_CESIUM_TOKEN loaded:', process.env.VUE_APP_CESIUM_TOKEN ? 'YES' : 'NO')
+console.log('Webpack - Token length:', process.env.VUE_APP_CESIUM_TOKEN ? process.env.VUE_APP_CESIUM_TOKEN.length : 0)
+
 process.env.NODE_ENV = 'development'
 
 const utils = require('./utils')

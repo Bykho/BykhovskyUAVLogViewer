@@ -23,6 +23,14 @@ module.exports = {
         target:"http://localhost:8001/uploaded",
         secure:"false"
       },
+      "/osm/*":{
+        target:"https://a.tile.openstreetmap.org/",
+        secure:"false",
+        changeOrigin: true,
+        pathRewrite: {
+          "^/osm": ""
+        }
+      },
     },
 
     // Various Dev Server settings

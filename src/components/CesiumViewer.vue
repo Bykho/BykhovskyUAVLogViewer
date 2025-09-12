@@ -25,6 +25,7 @@ import {
     Color,
     ProviderViewModel,
     UrlTemplateImageryProvider,
+    OpenStreetMapImageryProvider,
     Viewer, createWorldTerrainAsync,
     PointPrimitiveCollection,
     ImageryLayer,
@@ -60,7 +61,9 @@ import {
     PolylineColorAppearance,
     Primitive,
     ShaderSource,
-    ImageMaterialProperty
+    ImageMaterialProperty,
+    createWorldImageryAsync,
+    IonWorldImageryStyle
 } from 'cesium'
 
 import { DateTime } from 'luxon'
@@ -86,6 +89,11 @@ import {
 
 // Set Cesium token from environment variable
 Ion.defaultAccessToken = process.env.VUE_APP_CESIUM_TOKEN || ''
+console.log('Cesium Ion Access Token:', process.env.VUE_APP_CESIUM_TOKEN ? 'Token is set' : 'No token found')
+console.log('Token length:', process.env.VUE_APP_CESIUM_TOKEN ? process.env.VUE_APP_CESIUM_TOKEN.length : 0)
+console.log('Token preview:', process.env.VUE_APP_CESIUM_TOKEN
+    ? process.env.VUE_APP_CESIUM_TOKEN.substring(0, 20) + '...'
+    : 'No token')
 
 const colorCoderMode = new ColorCoderMode(store)
 const colorCoderRange = new ColorCoderRange(store)
@@ -140,12 +148,12 @@ export default {
         async asyncSetup () {
             if (this.viewer == null) {
                 if (this.state.isOnline) {
-                    this.viewer = this.createViewer(true)
+                    this.viewer = await this.createViewer(true)
                     if (this.state.vehicle !== 'boat') {
                         this.viewer.terrainProvider = await createWorldTerrainAsync()
                     }
                 } else {
-                    this.viewer = this.createViewer(false)
+                    this.viewer = await this.createViewer(false)
                 }
                 this.viewer.scene.debugShowFramesPerSecond = true
 
@@ -246,10 +254,15 @@ export default {
             await this.waitForMessages(newCoder.requiredMessages)
             this.colorCoder = newCoder
         },
-        createViewer (online) {
+        async createViewer (online) {
             if (online) {
                 console.log('creating online viewer')
                 const imageryProviders = this.createAdditionalProviders()
+
+                // Use Cesium Ion world imagery to avoid CORS issues
+                const worldImagery = await createWorldImageryAsync({
+                    style: IonWorldImageryStyle.AERIAL_WITH_LABELS
+                })
                 return new Viewer(
                     'cesiumContainer',
                     {
@@ -261,10 +274,7 @@ export default {
                         scene3DOnly: false,
                         selectionIndicator: false,
                         shadows: true,
-                        // eslint-disable-next-line
-                        baseLayer: new ImageryLayer.fromProviderAsync(
-                            IonImageryProvider.fromAssetId(3954)
-                        ),
+                        imageryProvider: worldImagery,
                         imageryProviderViewModels: imageryProviders,
                         orderIndependentTranslucency: false,
                         useBrowserRecommendedResolution: false
@@ -298,17 +308,7 @@ export default {
             * */
             // const imageryProviders = createDefaultImageryProviderViewModels()
             const imageryProviders = []
-            imageryProviders.push(new ProviderViewModel({
-                name: 'StatKart',
-                iconUrl: require('../assets/statkart.jpg').default,
-                tooltip: 'Statkart aerial imagery \nhttp://statkart.no/',
-                creationFunction: function () {
-                    return new UrlTemplateImageryProvider({
-                        url: 'http://opencache.statkart.no/gatekeeper/gk/gk.open_gmaps?layers=topo4&zoom={z}&x={x}&y={y}',
-                        credit: 'Map tiles by Statkart.'
-                    })
-                }
-            }))
+            // Removed StatKart due to CORS issues
             imageryProviders.push(new ProviderViewModel({
                 name: 'MapTiler',
                 iconUrl: require('../assets/maptiler.png').default,
@@ -355,8 +355,8 @@ export default {
                 },
                 creationFunction: function () {
                     return [
-                        new UrlTemplateImageryProvider({
-                            url: 'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        new OpenStreetMapImageryProvider({
+                            url: 'https://c.tile.openstreetmap.org/',
                             credit: 'Map tiles by OpenStreetMap.'
                         }),
                         new UrlTemplateImageryProvider({
