@@ -83,6 +83,7 @@ TOOL_FUNCTIONS = {
     "telemetry_slice": "bridge_tool",  # Bridge tool - handled specially
     "analyze_flight_baseline": None,  # Will be set below
     "detect_statistical_outliers": None,  # Will be set below
+    "trace_causal_chains": None,  # Will be set below
 }
 
 # Tool definitions for OpenAI
@@ -232,58 +233,26 @@ TOOL_DEFINITIONS = [
                 "required": ["sessionId", "stream", "fields"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_causal_chains",
+            "description": "Find STATUSTEXT events that may be causally related to a target timestamp",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sessionId": {"type": "string", "description": "The session ID to analyze"},
+                    "target_timestamp_ms": {"type": "number", "description": "Timestamp to investigate"},
+                    "time_window_ms": {"type": "number", "description": "Search window in milliseconds (default: 30000)"}
+                },
+                "required": ["sessionId", "target_timestamp_ms"]
+            }
+        }
     }
 ]
 
-# Legacy system prompt for old /chat endpoint
-LEGACY_SYSTEM_PROMPT = """You are a flight-data analyst for ArduPilot/PX4 MAVLink telemetry.
-
-You will receive:
-- a natural-language question, and
-- a compact JSON "digest" of one flight with arrays:
-  alt: [{t, alt_m}]
-  gps: [{t, fix, sats}]
-  gpos: [{t, lat, lon, rel_alt_m}]
-  events: [{t, severity, text}]
-  meta: {…} (optional start/end timestamps or other notes)
-
-Conventions:
-- t is milliseconds (ms). Use it as the timeline reference. If you convert to seconds, say so.
-- Units: altitude[m], rel_alt_m[m], speed[m/s] (if present), voltage[V] (if present).
-- GPS fix: fix < 3 ⇒ no 3D fix; 3 ⇒ 3D; 5/6 ⇒ RTK float/fixed.
-- STATUSTEXT severity: 0–3 are critical (treat as "critical").
-- Use only data present in the digest. If a value isn't available, say "Not available".
-- Be crisp and cite times using t (ms). 1 decimal place where useful.
-
-Reasoning recipes (use flexibly, not rigid rules):
-- Highest altitude = max of alt[].alt_m; else max of gpos[].rel_alt_m.
-- Flight time = meta.end_ms - meta.start_ms if provided; else (max t - min t across streams).
-- First GPS loss = first t where gps.fix < 3.
-- Critical errors = events with severity ≤ 3 OR text containing FAILSAFE, GPS, EKF, BATTERY, CRASH, VIBRATION.
-- Anomalies to notice: long gaps (>2000 ms) in gps/gpos; sudden rel_alt_m jumps (>10 m between successive samples); noisy fix oscillation; clusters of WARN/ERROR.
-
-Output format (must follow exactly):
-1) A short natural-language answer (2–6 sentences), direct and specific.
-2) A fenced JSON block with this schema (include only keys you can support; use null when unknown):
-{
-  "metrics": {
-    "max_altitude_m": number|null,
-    "max_altitude_t_ms": number|null,
-    "flight_time_s": number|null,
-    "first_gps_loss_t_ms": number|null
-  },
-  "events": {
-    "critical": [{"t_ms": number, "severity": number, "text": string}],
-    "gps_loss_windows": [{"start_t_ms": number, "end_t_ms": number|null}]
-  },
-  "anomalies": [
-    {"t_ms": number, "type": "gap"|"altitude_jump"|"gps_instability"|"other", "detail": string}
-  ],
-  "notes": string
-}
-No extra prose outside those two sections.
-"""
-
+# New system prompt for tool-calling
 # New system prompt for tool-calling
 TOOL_SYSTEM_PROMPT = """You are a UAV telemetry analyst. Use tools to inspect data and compute answers deterministically.
 
@@ -293,11 +262,27 @@ Guidelines:
 - When you need raw/high-res data in a window, call telemetry_slice with specific stream, fields, and tight time bounds
 - Use analyze_flight_baseline to calculate statistical baselines for telemetry streams
 - Use detect_statistical_outliers to identify anomalies using dynamic thresholds
+- Use trace_causal_chains to find STATUSTEXT events related to specific timestamps
 - Prefer small windows first; expand only if needed
 - Be factual and precise
 - Units: meters (m), m/s, volts (V)
 - Time: t_ms (milliseconds)
 - If data is missing, say so clearly
+
+Investigation Workflows:
+When users ask broad investigative questions, follow these structured patterns:
+
+- "Are there any anomalies?" or "What looks unusual?" → Start with detect_statistical_outliers on key streams (GLOBAL_POSITION_INT for altitude/velocity), then use trace_causal_chains for any significant outliers found
+- "What went wrong?" or "What caused problems?" → First use metrics_compute for critical_errors, then trace_causal_chains around error timestamps  
+- "Analyze this flight" or "Give me an overview" → Begin with telemetry_index to see available data, then metrics_compute for key metrics (max_altitude, flight_time, critical_errors), followed by targeted outlier detection on problem areas
+- For any outliers or anomalies discovered, always follow up with trace_causal_chains using the anomaly timestamp to find related events
+
+Severity Classification:
+- HIGH: Critical safety issues, system failures, significant deviations (>3σ)
+- MEDIUM: Notable outliers, operational anomalies (2.5-3σ)  
+- LOW: Minor deviations, normal operational variations (<2.5σ)
+
+Always synthesize findings into a coherent narrative rather than just listing tool results. Prioritize HIGH severity findings first.
 
 IMPORTANT: When calling tools, use the exact sessionId provided in the user's request. Do not use placeholder values.
 
@@ -314,6 +299,8 @@ When using statistical analysis tools (analyze_flight_baseline, detect_statistic
 - Explain the statistical methods used (rolling windows, confidence intervals, outlier thresholds)
 - Include data quality assessments and confidence scores
 - Make the analysis transparent and trustworthy by showing your work"""
+
+
 
 # Tool implementations
 def telemetry_index(session_id: str) -> Dict[str, Any]:
@@ -1196,11 +1183,82 @@ def detect_statistical_outliers_impl(session_id: str, stream: str, fields: List[
             "data_quality": f"Exception during analysis: {str(e)}"
         }
 
+def trace_causal_chains_impl(session_id: str, target_timestamp_ms: int, time_window_ms: int = 30000) -> Dict[str, Any]:
+    """Find STATUSTEXT events that may be causally related to a target timestamp"""
+    if session_id not in sessions:
+        return {
+            "ok": False,
+            "error": f"Session {session_id} not found",
+            "methodology": "Session validation",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": "Session not found"
+        }
+    
+    session = sessions[session_id]
+    
+    try:
+        # Search for STATUSTEXT events within the time window
+        nearby_events = []
+        window_start = target_timestamp_ms - time_window_ms
+        window_end = target_timestamp_ms + time_window_ms
+        
+        # Look through session events for STATUSTEXT messages
+        for event in session.events:
+            if event.get("text"):  # Check if the event has text content
+                event_time = event.get("t", 0)  # Use "t" for timestamp
+                
+                # Check if event is within time window
+                if window_start <= event_time <= window_end:
+                    time_delta = event_time - target_timestamp_ms
+                    nearby_events.append({
+                        "timestamp_ms": event_time,
+                        "text": event.get("text", ""),
+                        "severity": event.get("severity", 0),
+                        "time_delta_ms": time_delta,
+                        "time_delta_seconds": round(time_delta / 1000, 1),
+                        "direction": "before" if time_delta < 0 else "after"
+                    })
+        
+        # Sort by proximity to target timestamp
+        nearby_events.sort(key=lambda x: abs(x["time_delta_ms"]))
+        
+        # Calculate proximity ranking
+        for i, event in enumerate(nearby_events):
+            event["proximity_rank"] = i + 1
+        
+        return {
+            "ok": True,
+            "methodology": f"Event correlation analysis for timestamp {target_timestamp_ms}. " +
+                          f"Searched for STATUSTEXT events within ±{time_window_ms}ms window. " +
+                          f"Found {len(nearby_events)} events, sorted by temporal proximity.",
+            "findings": {
+                "target_timestamp_ms": target_timestamp_ms,
+                "time_window_ms": time_window_ms,
+                "events_found": len(nearby_events),
+                "nearby_events": nearby_events
+            },
+            "confidence": min(1.0, len(nearby_events) / 10.0),  # Higher confidence with more events
+            "data_quality": f"Analyzed {len(session.events)} total events in session. " +
+                           f"Found {len(nearby_events)} STATUSTEXT events within ±{time_window_ms}ms of target."
+        }
+        
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Event correlation failed: {str(e)}",
+            "methodology": "Event correlation execution",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Exception during analysis: {str(e)}"
+        }
+
 # Register tool functions
 TOOL_FUNCTIONS["telemetry_index"] = telemetry_index
 TOOL_FUNCTIONS["metrics_compute"] = metrics_compute
 TOOL_FUNCTIONS["analyze_flight_baseline"] = analyze_flight_baseline_impl
 TOOL_FUNCTIONS["detect_statistical_outliers"] = detect_statistical_outliers_impl
+TOOL_FUNCTIONS["trace_causal_chains"] = trace_causal_chains_impl
 
 @app.get("/health")
 def health_check():
@@ -1254,24 +1312,6 @@ def delete_session(session_id: str):
 def list_sessions():
     return list(sessions.keys())
 
-@app.post("/chat", response_model=ChatReply)
-def chat(req: ChatRequest):
-    """Legacy chat endpoint - kept for backward compatibility"""
-    try:
-        user_content = f"Question: {req.question}\n\nDigest JSON:\n{req.digest}"
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": LEGACY_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.2,
-            max_tokens=900,
-        )
-        text = resp.choices[0].message.content.strip()
-        return {"reply": text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat-tools", response_model=ToolCallReply)
 def chat_with_tools(req: ToolCallRequest):
@@ -1351,6 +1391,19 @@ def chat_with_tools(req: ToolCallRequest):
                                 "tool": "telemetry_slice",
                                 "params": tool_args
                             }
+                        elif tool_name == "analyze_flight_baseline":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
+                                                               tool_args["fields"], tool_args.get("window_size_ms", 30000))
+                        elif tool_name == "detect_statistical_outliers":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
+                                                                    tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
+                                                                    tool_args.get("window_size_ms", 30000))
+                        elif tool_name == "trace_causal_chains":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
+                                                                    tool_args.get("time_window_ms", 30000))
                         else:
                             result = {"status": "not_implemented", "tool": tool_name}
                     except Exception as e:
@@ -1608,6 +1661,10 @@ def tool_reply_batch(req: dict):
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
                                                                     tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
                                                                     tool_args.get("window_size_ms", 30000))
+                        elif tool_name == "trace_causal_chains":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
+                                                                    tool_args.get("time_window_ms", 30000))
                         else:
                             result = {"status": "error", "tool": tool_name, "error": f"Unknown tool: {tool_name}"}
                     except Exception as e:
@@ -1827,6 +1884,19 @@ def tool_reply(req: ToolReplyRequest):
                                 "tool": "telemetry_slice",
                                 "params": tool_args
                             }
+                        elif tool_name == "analyze_flight_baseline":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
+                                                               tool_args["fields"], tool_args.get("window_size_ms", 30000))
+                        elif tool_name == "detect_statistical_outliers":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
+                                                                    tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
+                                                                    tool_args.get("window_size_ms", 30000))
+                        elif tool_name == "trace_causal_chains":
+                            # Regular backend tool - execute directly
+                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
+                                                                    tool_args.get("time_window_ms", 30000))
                         else:
                             result = {"status": "not_implemented", "tool": tool_name}
                     except Exception as e:
