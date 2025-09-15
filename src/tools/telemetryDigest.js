@@ -38,24 +38,66 @@ function downsample1Hz (rows, getT) {
     return out.map(({ r, t }) => ({ ...r, t }))
 }
 
+export function convertMessageObjectToRecords (messageObj) {
+    if (!messageObj || typeof messageObj !== 'object') return []
+
+    const keys = Object.keys(messageObj)
+    if (keys.length === 0) return []
+
+    // Get the length from the first array property
+    const firstKey = keys[0]
+    const length = Array.isArray(messageObj[firstKey]) ? messageObj[firstKey].length : 0
+
+    if (length === 0) return []
+
+    // Convert to array of records
+    const records = []
+    for (let i = 0; i < length; i++) {
+        const record = {}
+        for (const key of keys) {
+            if (Array.isArray(messageObj[key])) {
+                record[key] = messageObj[key][i]
+            }
+        }
+        records.push(record)
+    }
+
+    return records
+}
+
 export function buildDigest (store) {
-    // Grab arrays (defensively) - try multiple possible field names
-    const storeData = store?.state || store || {}
+    // Look for messages in the correct location - they're nested under store.state.messages
+    const messages = store?.state?.messages || store?.messages || store?.state || store || {}
 
-    // Try different possible field names for VFR_HUD
-    const vfr = storeData.VFR_HUD || storeData.VFRHUD || storeData.vfr_hud || storeData.vfrhud || []
+    // Enhanced debugging
+    console.log('=== DIGEST DEBUG ===')
+    console.log('Store structure:', Object.keys(store?.state || {}))
+    console.log('Messages object exists:', !!messages)
+    console.log('Messages keys:', Object.keys(messages || {}))
+    console.log('Messages object sample:', messages)
 
-    // Try different possible field names for GPS_RAW_INT
-    const gps = storeData.GPS_RAW_INT || storeData.GPSRAWINT || storeData.gps_raw_int || storeData.gpsrawint || []
+    // Check if we have arrays or objects for the key message types
+    const messageKeys = ['VFR_HUD', 'GLOBAL_POSITION_INT', 'GPS_RAW_INT', 'STATUSTEXT']
+    messageKeys.forEach(key => {
+        const data = messages[key]
+        console.log(`${key}:`, {
+            exists: !!data,
+            type: typeof data,
+            isArray: Array.isArray(data),
+            length: data?.length,
+            keys: data ? Object.keys(data) : null,
+            sample: data?.[0] || data
+        })
+    })
+    console.log('=== END DIGEST DEBUG ===')
 
-    // Try different possible field names for GLOBAL_POSITION_INT
-    const gpos = storeData.GLOBAL_POSITION_INT || storeData.GLOBALPOSITIONINT ||
-                 storeData.global_position_int || storeData.globalpositionint || []
+    // Convert message objects to record arrays
+    const vfr = convertMessageObjectToRecords(messages.VFR_HUD || messages.VFRHUD)
+    const gps = convertMessageObjectToRecords(messages.GPS_RAW_INT || messages.GPSRAWINT)
+    const gpos = convertMessageObjectToRecords(messages.GLOBAL_POSITION_INT || messages.GLOBALPOSITIONINT)
+    const events = convertMessageObjectToRecords(messages.STATUSTEXT || messages.StatusText)
 
-    // Try different possible field names for STATUSTEXT
-    const events = storeData.STATUSTEXT || storeData.StatusText || storeData.statustext || storeData.status_text || []
-
-    const meta = storeData.metadata || storeData.meta || {}
+    const meta = store?.state?.metadata || store?.metadata || store?.state?.meta || store?.meta || {}
 
     // Debug logging
     console.log('Digest debug - VFR_HUD count:', vfr.length)
@@ -66,7 +108,7 @@ export function buildDigest (store) {
     if (gpos.length > 0) console.log('Digest debug - First GLOBAL_POSITION_INT row:', gpos[0])
 
     // 1 Hz downsampling with computed t (ms) - try multiple altitude field names
-    const alt = downsample1Hz(
+    let alt = downsample1Hz(
         vfr.map(r => {
             const t = pickTimeMs(r)
             const a = r?.alt ?? r?.Alt ?? r?.altitude ?? null
@@ -74,6 +116,19 @@ export function buildDigest (store) {
         }),
         (r) => r.t
     ).filter(x => x.t != null && Number.isFinite(x.altM))
+
+    // If no VFR_HUD altitude data, fallback to GLOBAL_POSITION_INT.relative_alt
+    if (alt.length === 0) {
+        console.log('No VFR_HUD altitude data, using GLOBAL_POSITION_INT.relative_alt as fallback')
+        alt = downsample1Hz(
+            gpos.map(r => {
+                const t = pickTimeMs(r)
+                const relAltMm = r?.relative_alt ?? r?.relativeAlt ?? r?.rel_alt ?? null
+                return { t, altM: (relAltMm != null) ? Number(relAltMm) / 1000 : null }
+            }),
+            (r) => r.t
+        ).filter(x => x.t != null && Number.isFinite(x.altM))
+    }
 
     const gpsArr = downsample1Hz(
         gps.map(r => ({
@@ -98,7 +153,7 @@ export function buildDigest (store) {
         (r) => r.t
     ).filter(x => x.t != null)
 
-    const eventsArr = (events || []).map(r => ({
+    const eventsArr = events.map(r => ({
         t: pickTimeMs(r),
         severity: (r?.severity != null) ? Number(r.severity) : null,
         text: (r?.text != null) ? String(r.text) : null

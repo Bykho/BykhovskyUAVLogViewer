@@ -15,8 +15,79 @@
         <DeviceIDViewer @close="state.showDeviceIDs = false" v-if="state.showDeviceIDs"></DeviceIDViewer>
         <AttitudeViewer @close="state.showAttitude = false" v-if="state.showAttitude"></AttitudeViewer>
         <MagFitTool     @close="state.showMagfit = false" v-if="state.showMagfit"></MagFitTool>
-        <EkfHelperTool  @close="state.showEkfHelper = false" v-if="state.showEkfHelper"></EkfHelperTool>
+        <EkfHelperTool @close="state.showEkfHelper = false" v-if="state.showEkfHelper"></EkfHelperTool>
+
+        <!-- Telemetry Health Dashboard -->
+        <div v-if="state.showTelemetryHealth" class="telemetry-health-dashboard"
+             style="position: fixed; top: 10px; right: 10px; background: white; border: 1px solid #ddd;
+                    border-radius: 8px; padding: 15px; max-width: 400px; z-index: 1000;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: center;
+                        margin-bottom: 10px;">
+                <h6 style="margin: 0; color: #333;">📊 Telemetry Health</h6>
+                <button @click="state.showTelemetryHealth = false"
+                        style="border: none; background: none; font-size: 18px; cursor: pointer;">×</button>
+            </div>
+
+            <div v-if="telemetryHealth" style="font-size: 12px;">
+                <div style="margin-bottom: 8px;">
+                    <strong>Streams:</strong> {{ telemetryHealth.streamCount }}
+                    <span v-if="telemetryHealth.missingStreams.length > 0" style="color: #dc3545;">
+                        ({{ telemetryHealth.missingStreams.length }} missing)
+                    </span>
+                </div>
+
+                <div style="margin-bottom: 8px;">
+                    <strong>Duration:</strong> {{ Math.round(telemetryHealth.duration / 1000) }}s
+                </div>
+
+                <div style="margin-bottom: 8px;">
+                    <strong>Events:</strong> {{ telemetryHealth.eventCount }}
+                </div>
+
+                <div style="margin-bottom: 8px;">
+                    <strong>Data Quality:</strong>
+                    <span :style="{
+                        color: telemetryHealth.quality === 'good' ? '#28a745' :
+                               telemetryHealth.quality === 'warning' ? '#ffc107' : '#dc3545'
+                    }">
+                        {{ telemetryHealth.quality.toUpperCase() }}
+                    </span>
+                </div>
+
+                <div v-if="telemetryHealth.missingStreams.length > 0" style="margin-top: 10px;">
+                    <strong>Missing:</strong> {{ telemetryHealth.missingStreams.join(', ') }}
+                </div>
+
+                <div style="margin-top: 10px; display: flex; gap: 5px;">
+                    <button @click="inspectTelemetry"
+                            style="padding: 2px 6px; font-size: 10px; border: 1px solid #007bff;
+                                   background: #007bff; color: white; border-radius: 3px; cursor: pointer;">
+                        Inspect
+                    </button>
+                    <button @click="compareUnits"
+                            style="padding: 2px 6px; font-size: 10px; border: 1px solid #28a745;
+                                   background: #28a745; color: white; border-radius: 3px; cursor: pointer;">
+                        Units
+                    </button>
+                </div>
+            </div>
+
+            <div v-else style="color: #666; font-size: 12px;">
+                No telemetry data loaded
+            </div>
+        </div>
+
         <div class="container-fluid" style="height: 100%; overflow: hidden;">
+
+            <!-- Telemetry Health Toggle Button -->
+            <button v-if="state.sessionBundle"
+                    @click="state.showTelemetryHealth = !state.showTelemetryHealth"
+                    style="position: fixed; top: 10px; right: 10px; z-index: 999; padding: 8px 12px;
+                           background: #007bff; color: white; border: none; border-radius: 4px;
+                           cursor: pointer; font-size: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                📊 Telemetry Health
+            </button>
 
             <sidebar/>
 
@@ -60,6 +131,8 @@ import { MavlinkDataExtractor } from '../tools/mavlinkDataExtractor'
 import { DjiDataExtractor } from '../tools/djiDataExtractor'
 import MagFitTool from '@/components/widgets/MagFitTool.vue'
 import EkfHelperTool from '@/components/widgets/EkfHelperTool.vue'
+import { buildSessionBundle } from '../tools/buildSessionBundle.js'
+import { postSession } from '../tools/sessionApi.js'
 import Vue from 'vue'
 
 export default {
@@ -78,7 +151,8 @@ export default {
     data () {
         return {
             state: store,
-            dataExtractor: null
+            dataExtractor: null,
+            telemetryHealth: null
         }
     },
     methods: {
@@ -194,6 +268,9 @@ export default {
 
             this.state.fences = this.dataExtractor.extractFences(this.state.messages)
 
+            // Build and store session bundle for agent access
+            this.buildSessionBundle()
+
             this.state.processStatus = 'Processed!'
             this.state.processDone = true
             // Change to plot view after 2 seconds so the Processed status is readable
@@ -226,6 +303,80 @@ export default {
                 this.state.colors.push(new Color(rgba[0], rgba[1], rgba[2]))
                 // this.translucentColors.push(new Cesium.Color(rgba[0], rgba[1], rgba[2], 0.1))
             }
+        },
+        buildSessionBundle () {
+            try {
+                const fileName = this.state.fileName || 'unknown'
+                const bundle = buildSessionBundle(this.state, fileName)
+
+                // Store bundle and sessionId in state for later use
+                this.state.sessionBundle = bundle
+                this.state.sessionId = bundle.sessionId
+
+                console.log('Session bundle created:', {
+                    sessionId: bundle.sessionId,
+                    streams: Object.keys(bundle.index).length,
+                    events: bundle.events.length,
+                    duration: bundle.meta.durationMs
+                })
+
+                // Post to backend
+                postSession(bundle).catch(error => {
+                    console.warn('Failed to post session bundle to backend:', error)
+                })
+            } catch (error) {
+                console.error('Failed to build session bundle:', error)
+            }
+        },
+        inspectTelemetry () {
+            if (window.inspectTelemetry) {
+                window.inspectTelemetry()
+            }
+        },
+        compareUnits () {
+            if (window.compareUnits) {
+                window.compareUnits()
+            }
+        },
+        updateTelemetryHealth () {
+            if (!this.state.sessionBundle) {
+                this.telemetryHealth = null
+                return
+            }
+
+            const bundle = this.state.sessionBundle
+            const messages = this.state.messages || {}
+
+            // Check for key streams
+            const keyStreams = [
+                'GLOBAL_POSITION_INT', 'GPS_RAW_INT', 'VFR_HUD',
+                'BATTERY_STATUS', 'RC_CHANNELS', 'STATUSTEXT'
+            ]
+            const missingStreams = keyStreams.filter(stream => !messages[stream])
+
+            // Determine data quality
+            let quality = 'good'
+            if (missingStreams.length > 3) {
+                quality = 'poor'
+            } else if (missingStreams.length > 0) {
+                quality = 'warning'
+            }
+
+            this.telemetryHealth = {
+                streamCount: Object.keys(bundle.index || {}).length,
+                missingStreams: missingStreams,
+                duration: bundle.meta?.durationMs || 0,
+                eventCount: bundle.events?.length || 0,
+                quality: quality
+            }
+        }
+    },
+    watch: {
+        'state.sessionBundle': {
+            handler () {
+                this.updateTelemetryHealth()
+            },
+            immediate: true
         }
     },
     components: {
