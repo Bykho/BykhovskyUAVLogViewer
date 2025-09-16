@@ -199,8 +199,6 @@ export default {
             if (message.name === 'GLOBAL_POSITION_INT') {
                 message.lat = message.lat / 10000000
                 message.lon = message.lon / 10000000
-                // eslint-disable-next-line
-                message.relative_alt = message.relative_alt / 1000
             }
             return message
         },

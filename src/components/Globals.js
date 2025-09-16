@@ -27,6 +27,7 @@ export const store = {
     showFences: true,
     showMap: false,
     showMagFit: false,
+    showTelemetryHealth: false,
     currentTime: false,
     processDone: false,
     plotOn: false,

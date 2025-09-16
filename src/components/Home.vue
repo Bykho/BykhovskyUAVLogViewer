@@ -17,77 +17,7 @@
         <MagFitTool     @close="state.showMagfit = false" v-if="state.showMagfit"></MagFitTool>
         <EkfHelperTool @close="state.showEkfHelper = false" v-if="state.showEkfHelper"></EkfHelperTool>
 
-        <!-- Telemetry Health Dashboard -->
-        <div v-if="state.showTelemetryHealth" class="telemetry-health-dashboard"
-             style="position: fixed; top: 10px; right: 10px; background: white; border: 1px solid #ddd;
-                    border-radius: 8px; padding: 15px; max-width: 400px; z-index: 1000;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-            <div style="display: flex; justify-content: space-between; align-items: center;
-                        margin-bottom: 10px;">
-                <h6 style="margin: 0; color: #333;">📊 Telemetry Health</h6>
-                <button @click="state.showTelemetryHealth = false"
-                        style="border: none; background: none; font-size: 18px; cursor: pointer;">×</button>
-            </div>
-
-            <div v-if="telemetryHealth" style="font-size: 12px;">
-                <div style="margin-bottom: 8px;">
-                    <strong>Streams:</strong> {{ telemetryHealth.streamCount }}
-                    <span v-if="telemetryHealth.missingStreams.length > 0" style="color: #dc3545;">
-                        ({{ telemetryHealth.missingStreams.length }} missing)
-                    </span>
-                </div>
-
-                <div style="margin-bottom: 8px;">
-                    <strong>Duration:</strong> {{ Math.round(telemetryHealth.duration / 1000) }}s
-                </div>
-
-                <div style="margin-bottom: 8px;">
-                    <strong>Events:</strong> {{ telemetryHealth.eventCount }}
-                </div>
-
-                <div style="margin-bottom: 8px;">
-                    <strong>Data Quality:</strong>
-                    <span :style="{
-                        color: telemetryHealth.quality === 'good' ? '#28a745' :
-                               telemetryHealth.quality === 'warning' ? '#ffc107' : '#dc3545'
-                    }">
-                        {{ telemetryHealth.quality.toUpperCase() }}
-                    </span>
-                </div>
-
-                <div v-if="telemetryHealth.missingStreams.length > 0" style="margin-top: 10px;">
-                    <strong>Missing:</strong> {{ telemetryHealth.missingStreams.join(', ') }}
-                </div>
-
-                <div style="margin-top: 10px; display: flex; gap: 5px;">
-                    <button @click="inspectTelemetry"
-                            style="padding: 2px 6px; font-size: 10px; border: 1px solid #007bff;
-                                   background: #007bff; color: white; border-radius: 3px; cursor: pointer;">
-                        Inspect
-                    </button>
-                    <button @click="compareUnits"
-                            style="padding: 2px 6px; font-size: 10px; border: 1px solid #28a745;
-                                   background: #28a745; color: white; border-radius: 3px; cursor: pointer;">
-                        Units
-                    </button>
-                </div>
-            </div>
-
-            <div v-else style="color: #666; font-size: 12px;">
-                No telemetry data loaded
-            </div>
-        </div>
-
         <div class="container-fluid" style="height: 100%; overflow: hidden;">
-
-            <!-- Telemetry Health Toggle Button -->
-            <button v-if="state.sessionBundle"
-                    @click="state.showTelemetryHealth = !state.showTelemetryHealth"
-                    style="position: fixed; top: 10px; right: 10px; z-index: 999; padding: 8px 12px;
-                           background: #007bff; color: white; border: none; border-radius: 4px;
-                           cursor: pointer; font-size: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
-                📊 Telemetry Health
-            </button>
 
             <sidebar/>
 
@@ -151,8 +81,7 @@ export default {
     data () {
         return {
             state: store,
-            dataExtractor: null,
-            telemetryHealth: null
+            dataExtractor: null
         }
     },
     methods: {

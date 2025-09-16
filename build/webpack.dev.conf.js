@@ -6,6 +6,8 @@ require('dotenv').config()
 // Debug: Check if environment variable is loaded
 console.log('Webpack - VUE_APP_CESIUM_TOKEN loaded:', process.env.VUE_APP_CESIUM_TOKEN ? 'YES' : 'NO')
 console.log('Webpack - Token length:', process.env.VUE_APP_CESIUM_TOKEN ? process.env.VUE_APP_CESIUM_TOKEN.length : 0)
+console.log('Webpack - VUE_APP_GROQ_API_KEY loaded:', process.env.VUE_APP_GROQ_API_KEY ? 'YES' : 'NO')
+console.log('Webpack - Groq key length:', process.env.VUE_APP_GROQ_API_KEY ? process.env.VUE_APP_GROQ_API_KEY.length : 0)
 
 process.env.NODE_ENV = 'development'
 

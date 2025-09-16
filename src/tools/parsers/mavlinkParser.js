@@ -97,10 +97,12 @@ export class MavlinkParser {
 
     static fixData (message) {
         if (message._name === 'GLOBAL_POSITION_INT') {
+            // console.log('RAW MAVLINK relative_alt before any conversion:', message.relative_alt)
             message.lat = message.lat / 10000000
             message.lon = message.lon / 10000000
             // eslint-disable-next-line
             message.relative_alt = message.relative_alt / 1000
+            // console.log('MAVLINK relative_alt after /1000 conversion:', message.relative_alt)
             return message
         } else if (message._name === 'HEARTBEAT') {
             message.asText = getModeString(message.type, message.custom_mode, message.base_mode)

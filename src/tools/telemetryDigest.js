@@ -124,7 +124,7 @@ export function buildDigest (store) {
             gpos.map(r => {
                 const t = pickTimeMs(r)
                 const relAltMm = r?.relative_alt ?? r?.relativeAlt ?? r?.rel_alt ?? null
-                return { t, altM: (relAltMm != null) ? Number(relAltMm) / 1000 : null }
+                return { t, altM: (relAltMm != null) ? Number(relAltMm) : null }
             }),
             (r) => r.t
         ).filter(x => x.t != null && Number.isFinite(x.altM))

@@ -64,6 +64,7 @@ class SessionBundle(BaseModel):
     index: Dict[str, Any]
     downsample1Hz: Dict[str, Any]
     events: List[Dict[str, Any]]
+    gaps: Optional[Dict[str, Any]] = None
 
 class SessionResponse(BaseModel):
     sessionId: str
@@ -120,7 +121,7 @@ TOOL_DEFINITIONS = [
                     },
                     "metric": {
                         "type": "string",
-                        "enum": ["max_altitude", "flight_time", "first_gps_loss", "first_rc_loss", "max_battery_temp", "critical_errors", "available_streams"],
+                        "enum": ["max_altitude", "flight_time", "first_gps_loss", "first_rc_loss", "max_battery_temp", "critical_errors", "available_streams", "missing_segments"],
                         "description": "The metric to compute"
                     }
                 },
@@ -265,6 +266,7 @@ Guidelines:
 - Use detect_statistical_outliers to identify anomalies using dynamic thresholds
 - Use trace_causal_chains to find STATUSTEXT events related to specific timestamps
 - Prefer small windows first; expand only if needed
+- Treat "altitude" as relative altitude from GLOBAL_POSITION_INT.relative_alt (in meters); if unavailable, fall back to VFR_HUD.alt (meters).
 - Be factual and precise
 - Units: meters (m), m/s, volts (V)
 - Time: t_ms (milliseconds)
@@ -273,10 +275,12 @@ Guidelines:
 Investigation Workflows:
 When users ask broad investigative questions, follow these structured patterns:
 
-- "Are there any anomalies?" or "What looks unusual?" → Start with detect_statistical_outliers on key streams (GLOBAL_POSITION_INT for altitude/velocity), then use trace_causal_chains for any significant outliers found
-- "What went wrong?" or "What caused problems?" → First use metrics_compute for critical_errors, then trace_causal_chains around error timestamps  
-- "Analyze this flight" or "Give me an overview" → Begin with telemetry_index to see available data, then metrics_compute for key metrics (max_altitude, flight_time, critical_errors), followed by targeted outlier detection on problem areas
-- For any outliers or anomalies discovered, always follow up with trace_causal_chains using the anomaly timestamp to find related events
+- "Are there any anomalies?" or "What looks unusual?" → Start with metrics_compute for missing_segments to check for big data gaps (≥5s), then report those timestamps. Only use detect_statistical_outliers if user specifically asks about spikes or outliers.
+- "What went wrong?" or "What caused problems?" → First use metrics_compute for critical_errors and missing_segments, then trace_causal_chains around error timestamps  
+- "Analyze this flight" or "Give me an overview" → Begin with telemetry_index to see available data, then metrics_compute for key metrics (max_altitude, flight_time, critical_errors, missing_segments)
+- For any big gaps found, mention them with timestamps and durations. Do not automatically run outlier detection unless specifically requested.
+- Focus on data gaps first - they are often the most significant anomalies in flight data
+- When listing altitude values over a window, follow the Retrieval rules above and state which source was used ("relative_alt" or "VFR_HUD.alt"). Do not mix sources within one answer unless the user explicitly requests a comparison.
 
 Correlation Analysis Guidelines:
 - For velocity/event correlation questions → Use detect_statistical_outliers on velocity fields to find significant changes, then use trace_causal_chains around those outlier timestamps to correlate with events
@@ -771,6 +775,55 @@ def metrics_compute_available_streams(session: SessionBundle) -> MetricResult:
             notes=f"Error computing available streams: {str(e)}"
         )
 
+def metrics_compute_missing_segments(session: SessionBundle) -> MetricResult:
+    """Find big gaps (≥5s) in telemetry streams"""
+    try:
+        if not session.gaps:
+            return MetricResult(
+                name="missing_segments",
+                ok=True,
+                value=0,
+                units="count",
+                t_ms=None,
+                method="Big gap analysis (≥5s only)",
+                source="session.gaps",
+                notes="No gap data available"
+            )
+        
+        # Collect only big gaps (≥5s) from all streams
+        gaps = []
+        for stream, arr in session.gaps.items():
+            for g in arr or []:
+                if g.get("durationMs", 0) >= 5000:  # Only gaps ≥5 seconds
+                    gaps.append({"stream": stream, **g})
+        
+        # Sort by start time
+        gaps.sort(key=lambda x: x.get('startMs', 0))
+        
+        return MetricResult(
+            name="missing_segments",
+            ok=True,
+            value=len(gaps),
+            units="count",
+            t_ms=None,
+            method="Big gap analysis (≥5s only)",
+            source="session.gaps",
+            notes=f"Found {len(gaps)} big gaps (≥5s). " +
+                  (f"Gaps: {[f'{g['stream']}@{g['startMs']}ms({g['durationMs']}ms)' for g in gaps[:5]]}" if gaps else "No big gaps found.")
+        )
+        
+    except Exception as e:
+        return MetricResult(
+            name="missing_segments",
+            ok=False,
+            value=None,
+            units="count",
+            t_ms=None,
+            method="",
+            source="",
+            notes=f"Error computing missing segments: {str(e)}"
+        )
+
 
 def metrics_compute(session_id: str, metric: str) -> MetricResult:
     """Compute specific metric from session data"""
@@ -802,6 +855,8 @@ def metrics_compute(session_id: str, metric: str) -> MetricResult:
         return metrics_compute_critical_errors(session)
     elif metric == "available_streams":
         return metrics_compute_available_streams(session)
+    elif metric == "missing_segments":
+        return metrics_compute_missing_segments(session)
     else:
         return MetricResult(
             name=metric,
