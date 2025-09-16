@@ -167,9 +167,8 @@ export default {
                 console.log('  - hasSignificantMovement (>5px):', hasSignificantMovement)
                 console.log('  - clampedWidth:', clampedWidth, 'clampedHeight:', clampedHeight)
 
-                // Apply width changes to sidebar
-                sidebar.style.width = clampedWidth + 'px'
-                sidebar.style.maxWidth = clampedWidth + 'px'
+                // Apply width changes to sidebar with !important to override CSS media queries
+                sidebar.style.setProperty('width', clampedWidth + 'px', 'important')
                 sidebar.style.setProperty('max-width', clampedWidth + 'px', 'important')
                 sidebar.style.setProperty('flex-basis', clampedWidth + 'px', 'important')
                 sidebar.style.setProperty('flex', '0 0 ' + clampedWidth + 'px', 'important')
