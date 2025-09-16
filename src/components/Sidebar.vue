@@ -35,7 +35,7 @@
                     <plotSetup/>
                     <message-menu/>
                 </div>
-                <div v-if="selected==='chat'" style="height: 400px;">
+                <div v-if="selected==='chat'" style="height: 400px; position: relative;">
                     <ChatPanel/>
                 </div>
                 <div v-if="selected==='home'">
@@ -275,6 +275,7 @@ a.centered-section {
         top: 0px;
         height: 100%;
         color: rgb(255, 255, 255);
+        z-index: 1100;
     }
     .nav-side-menu .toggle-btn {
         display: none;
@@ -594,6 +595,7 @@ a.centered-section {
     .files-list li {
         border-left: none;
     }
+
     .files-header {
         border-left: none;
         margin-left: 40%;

@@ -46,6 +46,7 @@ class ToolReplyRequest(BaseModel):
 class ToolReplyResponse(BaseModel):
     status: str
     message: str
+    debug: Optional[dict] = None
 
 class MetricResult(BaseModel):
     name: str
@@ -276,6 +277,11 @@ When users ask broad investigative questions, follow these structured patterns:
 - "What went wrong?" or "What caused problems?" → First use metrics_compute for critical_errors, then trace_causal_chains around error timestamps  
 - "Analyze this flight" or "Give me an overview" → Begin with telemetry_index to see available data, then metrics_compute for key metrics (max_altitude, flight_time, critical_errors), followed by targeted outlier detection on problem areas
 - For any outliers or anomalies discovered, always follow up with trace_causal_chains using the anomaly timestamp to find related events
+
+Correlation Analysis Guidelines:
+- For velocity/event correlation questions → Use detect_statistical_outliers on velocity fields to find significant changes, then use trace_causal_chains around those outlier timestamps to correlate with events
+- Always perform quantitative analysis rather than just descriptive comparisons
+- Focus on temporal relationships between telemetry changes and events
 
 Severity Classification:
 - HIGH: Critical safety issues, system failures, significant deviations (>3σ)
@@ -1318,8 +1324,17 @@ def chat_with_tools(req: ToolCallRequest):
     """New chat endpoint with OpenAI tool-calling"""
     start_time = time.time()
     last_tool_result = None
+    tool_execution_log = []  # Track tool execution for frontend widget
     
     try:
+        # Clean up any existing pending conversation for this session
+        # This prevents state corruption when starting a new conversation
+        if req.sessionId in pending_conversations:
+            print(f"Cleaning up existing pending conversation for session {req.sessionId}")
+            print(f"Pending calls before cleanup: {list(pending_conversations[req.sessionId]['pending_calls'].keys())}")
+            del pending_conversations[req.sessionId]
+            print(f"Successfully cleaned up session {req.sessionId}")
+        
         # Initialize messages with system prompt
         system_prompt = TOOL_SYSTEM_PROMPT + f"\n\nCurrent session ID: {req.sessionId}"
         messages = [
@@ -1413,6 +1428,14 @@ def chat_with_tools(req: ToolCallRequest):
                     tool_duration = time.time() - tool_start
                     print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
                     
+                    # Log tool execution for frontend widget (only for non-bridge tools)
+                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
+                        tool_execution_log.append({
+                            "tool": tool_name,
+                            "duration": round(tool_duration, 3),
+                            "status": "completed"
+                        })
+                    
                     # Handle bridge requests specially
                     if isinstance(result, dict) and result.get("type") == "bridge_request":
                         session_id = tool_args["sessionId"]
@@ -1423,8 +1446,12 @@ def chat_with_tools(req: ToolCallRequest):
                                 "messages": messages.copy(),
                                 "pending_calls": {},
                                 "iteration": iteration,
-                                "start_time": start_time
+                                "start_time": start_time,
+                                "tool_execution_log": tool_execution_log.copy()
                             }
+                        else:
+                            # Preserve existing tool execution log
+                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
                         pending_conversations[session_id]["pending_calls"][tool_call.id] = {
@@ -1493,7 +1520,8 @@ def chat_with_tools(req: ToolCallRequest):
             debug={
                 "iterations": iteration,
                 "duration_s": round(total_duration, 3),
-                "lastToolResult": last_tool_result
+                "lastToolResult": last_tool_result,
+                "toolExecutionLog": tool_execution_log
             }
         )
         
@@ -1504,6 +1532,7 @@ def chat_with_tools(req: ToolCallRequest):
 @app.post("/tool-reply-batch", response_model=ToolReplyResponse)
 def tool_reply_batch(req: dict):
     """Handle batch tool replies to prevent duplicate tool_call_id errors"""
+    tool_execution_log = []  # Track tool execution for frontend widget
     try:
         print(f"=== BATCH TOOL REPLY DEBUG ===")
         print(f"SessionId: {req.get('sessionId')}")
@@ -1549,11 +1578,14 @@ def tool_reply_batch(req: dict):
         print(f"Current message tool_call_ids: {existing_tool_ids}")
         
         # Get all tool_call_ids from the last assistant message that has tool_calls
+        # Only consider tool calls from the current conversation turn (not from previous conversations)
         valid_tool_call_ids = set()
         for msg in reversed(messages):
             if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+                # Only consider tool calls that are in our pending calls
                 for tool_call in msg['tool_calls']:
-                    valid_tool_call_ids.add(tool_call['id'])
+                    if tool_call['id'] in conversation["pending_calls"]:
+                        valid_tool_call_ids.add(tool_call['id'])
                 break
         
         print(f"Valid tool_call_ids from last assistant message: {list(valid_tool_call_ids)}")
@@ -1674,6 +1706,14 @@ def tool_reply_batch(req: dict):
                     tool_duration = time.time() - tool_start
                     print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
                     
+                    # Log tool execution for frontend widget (only for non-bridge tools)
+                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
+                        tool_execution_log.append({
+                            "tool": tool_name,
+                            "duration": round(tool_duration, 3),
+                            "status": "completed"
+                        })
+                    
                     # Handle bridge requests specially
                     if isinstance(result, dict) and result.get("type") == "bridge_request":
                         session_id = tool_args["sessionId"]
@@ -1684,8 +1724,12 @@ def tool_reply_batch(req: dict):
                                 "messages": messages.copy(),
                                 "pending_calls": {},
                                 "iteration": iteration,
-                                "start_time": start_time
+                                "start_time": start_time,
+                                "tool_execution_log": tool_execution_log.copy()
                             }
+                        else:
+                            # Preserve existing tool execution log
+                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
                         pending_conversations[session_id]["pending_calls"][tool_call.id] = {
@@ -1727,6 +1771,9 @@ def tool_reply_batch(req: dict):
                 reply = message["content"]
                 break
         
+        # Get the preserved tool execution log before cleanup
+        preserved_log = conversation.get("tool_execution_log", [])
+        
         # Clean up the pending conversation
         del pending_conversations[session_id]
         
@@ -1735,7 +1782,10 @@ def tool_reply_batch(req: dict):
         
         return ToolReplyResponse(
             status="completed",
-            message=reply
+            message=reply,
+            debug={
+                "toolExecutionLog": preserved_log + tool_execution_log
+            }
         )
         
     except Exception as e:
@@ -1747,6 +1797,7 @@ def tool_reply_batch(req: dict):
 @app.post("/tool-reply", response_model=ToolReplyResponse)
 def tool_reply(req: ToolReplyRequest):
     """Handle tool reply from frontend and resume agent conversation"""
+    tool_execution_log = []  # Track tool execution for frontend widget
     try:
         print(f"=== TOOL REPLY DEBUG ===")
         print(f"Received tool reply: call_id={req.call_id}, tool={req.tool}")
@@ -1795,10 +1846,28 @@ def tool_reply(req: ToolReplyRequest):
         existing_tool_ids = [msg.get('tool_call_id') for msg in messages if msg.get('role') == 'tool']
         print(f"Current message tool_call_ids: {existing_tool_ids}")
         
+        # Get all tool_call_ids from the last assistant message that has tool_calls
+        # Only consider tool calls from the current conversation turn (not from previous conversations)
+        valid_tool_call_ids = set()
+        for msg in reversed(messages):
+            if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+                # Only consider tool calls that are in our pending calls
+                for tool_call in msg['tool_calls']:
+                    if tool_call['id'] in conversation["pending_calls"]:
+                        valid_tool_call_ids.add(tool_call['id'])
+                break
+        
+        print(f"Valid tool_call_ids from last assistant message: {list(valid_tool_call_ids)}")
+        
         for call_id, call_data in conversation["pending_calls"].items():
             # Skip if this tool_call_id already exists in the conversation
             if call_id in existing_tool_ids:
                 print(f"Skipping duplicate tool_call_id: {call_id}")
+                continue
+            
+            # Skip if this tool_call_id is not in the valid set
+            if call_id not in valid_tool_call_ids:
+                print(f"Skipping invalid tool_call_id: {call_id} (not found in last assistant message)")
                 continue
                 
             try:
@@ -1906,6 +1975,14 @@ def tool_reply(req: ToolReplyRequest):
                     tool_duration = time.time() - tool_start
                     print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
                     
+                    # Log tool execution for frontend widget (only for non-bridge tools)
+                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
+                        tool_execution_log.append({
+                            "tool": tool_name,
+                            "duration": round(tool_duration, 3),
+                            "status": "completed"
+                        })
+                    
                     # Handle bridge requests specially
                     if isinstance(result, dict) and result.get("type") == "bridge_request":
                         session_id = tool_args["sessionId"]
@@ -1916,8 +1993,12 @@ def tool_reply(req: ToolReplyRequest):
                                 "messages": messages.copy(),
                                 "pending_calls": {},
                                 "iteration": iteration,
-                                "start_time": start_time
+                                "start_time": start_time,
+                                "tool_execution_log": tool_execution_log.copy()
                             }
+                        else:
+                            # Preserve existing tool execution log
+                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
                         pending_conversations[session_id]["pending_calls"][tool_call.id] = {
@@ -1956,6 +2037,9 @@ def tool_reply(req: ToolReplyRequest):
                 reply = message["content"]
                 break
         
+        # Get the preserved tool execution log before cleanup
+        preserved_log = conversation.get("tool_execution_log", [])
+        
         # Clean up the pending conversation
         del pending_conversations[session_id]
         
@@ -1964,7 +2048,10 @@ def tool_reply(req: ToolReplyRequest):
         
         return ToolReplyResponse(
             status="completed",
-            message=reply
+            message=reply,
+            debug={
+                "toolExecutionLog": preserved_log + tool_execution_log
+            }
         )
         
     except Exception as e:
