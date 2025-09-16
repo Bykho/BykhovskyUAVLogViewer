@@ -823,10 +823,8 @@ export default {
                                 'Generate exactly 3 follow-up questions for the user.\n\n' +
                                 'Guidelines:\n' +
                                 '- Each question should be focused, clear, and useful for understanding the flight.\n' +
-                                '- Slightly longer than a short phrase, but no more than one short sentence.\n' +
-                                '- Be specific: reference time ranges, metrics, or events when possible.\n' +
-                                '- Cover different angles (e.g., anomalies, correlations, performance, events).\n' +
-                                '- Avoid vague prompts like "Are there any anomalies?" — make them concrete.\n' +
+                                '- Each question should be a short sentence (80 chars approximately).\n' +
+                                '- Be specific: reference time ranges, or events when possible.\n' +
                                 '- Avoid duplicates of existing questions.\n' +
                                 '- Make them related to the chat that came before.\n\n' +
                                 'Return ONLY valid JSON:\n' +
