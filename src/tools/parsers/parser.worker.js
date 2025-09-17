@@ -5,7 +5,6 @@ const DataflashParser = require('./JsDataflashParser/parser').default
 const DjiParser = require('./djiParser').default
 
 let parser
-let pendingActions = [] // Buffer actions until parser is ready
 self.addEventListener('message', async function (event) {
     if (event.data === null) {
         console.log('got bad file message!')
@@ -22,32 +21,15 @@ self.addEventListener('message', async function (event) {
             parser.processData(data, ['CMD', 'MSG', 'FILE', 'MODE', 'AHR2', 'ATT', 'GPS', 'POS',
                 'XKQ1', 'XKQ', 'NKQ1', 'NKQ2', 'XKQ2', 'PARM', 'MSG', 'STAT', 'EV', 'XKF4', 'FNCE'])
         }
-        // Flush any actions queued before parser was ready
-        if (pendingActions.length && parser) {
-            try {
-                for (const act of pendingActions) {
-                    if (act.action === 'loadType') {
-                        parser.loadType(act.type)
-                    } else if (act.action === 'trimFile') {
-                        parser.trimFile(act.time)
-                    }
-                }
-            } finally {
-                pendingActions = []
-            }
-        }
+
     } else if (event.data.action === 'loadType') {
         if (!parser) {
-            // Queue until parser is initialized
-            pendingActions.push({ action: 'loadType', type: event.data && event.data.type && event.data.type.split('[')[0] })
+            console.warn('parser not ready; ignoring loadType', event.data && event.data.type)
             return
         }
         parser.loadType(event.data.type.split('[')[0])
     } else if (event.data.action === 'trimFile') {
-        if (!parser) {
-            pendingActions.push({ action: 'trimFile', time: event.data && event.data.time })
-            return
-        }
+        if (!parser) return
         parser.trimFile(event.data.time)
     }
 })
