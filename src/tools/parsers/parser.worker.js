@@ -24,10 +24,12 @@ self.addEventListener('message', async function (event) {
 
     } else if (event.data.action === 'loadType') {
         if (!parser) {
-            console.log('parser not ready')
+            console.warn('parser not ready; ignoring loadType', event.data && event.data.type)
+            return
         }
         parser.loadType(event.data.type.split('[')[0])
     } else if (event.data.action === 'trimFile') {
+        if (!parser) return
         parser.trimFile(event.data.time)
     }
 })
