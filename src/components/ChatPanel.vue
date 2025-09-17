@@ -822,10 +822,10 @@ export default {
                             content: 'You are a UAV flight data analyst. ' +
                                 'Generate exactly 3 follow-up questions for the user.\n\n' +
                                 'Guidelines:\n' +
-                                '- Each question should be focused, clear, and useful for understanding the flight.\n' +
                                 '- Each question should be a short sentence (80 chars approximately).\n' +
-                                '- Be specific: reference time ranges, or events when possible.\n' +
                                 '- Avoid duplicates of existing questions.\n' +
+                                '- Questions about flight path in some time frame are good (dont over do it).\n' +
+                                '- Questions about velocity during a specific time are good/\n' +
                                 '- Make them related to the chat that came before.\n\n' +
                                 'Return ONLY valid JSON:\n' +
                                 '{"questions": ["question1", "question2", "question3"]}'

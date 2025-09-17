@@ -281,6 +281,7 @@ When users ask broad investigative questions, follow these structured patterns:
 - For any big gaps found, mention them with timestamps and durations. Do not automatically run outlier detection unless specifically requested.
 - Focus on data gaps first - they are often the most significant anomalies in flight data
 - When listing altitude values over a window, follow the Retrieval rules above and state which source was used ("relative_alt" or "VFR_HUD.alt"). Do not mix sources within one answer unless the user explicitly requests a comparison.
+- When a user asks about turns, you can use the attitude data from the UAV to investigate orientation, which could imply turning.
 
 Correlation Analysis Guidelines:
 - For velocity/event correlation questions → Use detect_statistical_outliers on velocity fields to find significant changes, then use trace_causal_chains around those outlier timestamps to correlate with events
@@ -1436,7 +1437,69 @@ def chat_with_tools(req: ToolCallRequest):
                 ]
             
             messages.append(message_dict)
-            
+
+            # If any bridge tools are present, stage ONLY those and defer others
+            if message.tool_calls:
+                bridge_calls = [
+                    tc for tc in message.tool_calls
+                    if getattr(tc, "function", None) and tc.function.name == "telemetry_slice"
+                ]
+                if bridge_calls:
+                    # Replace tool_calls in the last assistant message with only the bridge calls
+                    filtered_tool_calls = [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in bridge_calls
+                    ]
+                    messages[-1]["tool_calls"] = filtered_tool_calls
+
+                    # Initialize pending conversation tracking
+                    session_id = req.sessionId
+                    if session_id not in pending_conversations:
+                        pending_conversations[session_id] = {
+                            "messages": messages.copy(),
+                            "pending_calls": {},
+                            "iteration": iteration,
+                            "start_time": start_time,
+                            "tool_execution_log": tool_execution_log.copy(),
+                        }
+                    else:
+                        pending_conversations[session_id]["messages"] = messages.copy()
+                        pending_conversations[session_id]["iteration"] = iteration
+                        pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
+
+                    # Register all bridge calls in pending_calls
+                    for tc in bridge_calls:
+                        tool_args = json.loads(tc.function.arguments)
+                        pending_conversations[session_id]["pending_calls"][tc.id] = {
+                            "tool": tc.function.name,
+                            "params": tool_args,
+                            "result": None,
+                        }
+
+                    # Return a single batch bridge request for the frontend
+                    return ToolCallReply(
+                        reply="",
+                        debug={
+                            "type": "batch_bridge_request",
+                            "session_id": session_id,
+                            "calls": [
+                                {
+                                    "call_id": call_id,
+                                    "tool": data["tool"],
+                                    "params": data["params"],
+                                }
+                                for call_id, data in pending_conversations[session_id]["pending_calls"].items()
+                            ],
+                        },
+                    )
+
             # Check if model wants to call tools
             if message.tool_calls:
                 for tool_call in message.tool_calls:
@@ -1537,6 +1600,7 @@ def chat_with_tools(req: ToolCallRequest):
                             )
                         else:
                             # More tool calls coming - continue processing
+                            # IMPORTANT: Skip adding tool message for bridge tools
                             continue
                     
                     # Add tool result to messages
