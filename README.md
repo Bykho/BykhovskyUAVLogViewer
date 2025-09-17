@@ -5,6 +5,38 @@
  This is a Javascript based log viewer for Mavlink telemetry and dataflash logs.
  [Live demo here](http://plot.ardupilot.org).
 
+## Quick Start (local, no Docker)
+
+```bash
+# 1) Clone + submodules
+git clone <your-fork-url>
+cd UAVLogViewer
+git submodule update --init --recursive
+
+# 2) Create env files from examples and paste your keys
+cp .env.example .env
+cp backend/.env.example backend/.env
+
+# 3) Backend (terminal 1)
+python3 -m venv backend/.venv
+source backend/.venv/bin/activate  # Windows: backend\.venv\Scripts\activate
+pip install -r backend/requirements.txt
+uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
+
+# 4) Frontend (terminal 2)
+npm install
+# Optional:
+# export VUE_APP_CESIUM_TOKEN=<your_cesium_token>
+# export VUE_APP_GROQ_API_KEY=<your_groq_key>
+npm run dev
+
+# App: http://localhost:8080
+```
+
+Notes:
+- The frontend calls the backend at `http://127.0.0.1:8000` (wired in code).
+- Use "Open Sample" to load the bundled VTOL log quickly, or upload your own `.tlog`/`.bin`.
+
 ## Build Setup
 
 ``` bash

@@ -11,19 +11,28 @@ This is a minimal, working agentic chatbot for UAVLogViewer that demonstrates fu
 
 ## Quick Start
 
-### 1. Start the Backend
+### 1) Backend
 ```bash
-cd /Users/nicodevelopment/Desktop/ArenaAI/UAVLogViewer
-source backend/.venv/bin/activate
+# From repo root
+python3 -m venv backend/.venv
+source backend/.venv/bin/activate  # Windows: backend\.venv\Scripts\activate
+pip install -r backend/requirements.txt
+
+# Ensure backend env exists
+cp backend/.env.example backend/.env  # if not present
+# Edit backend/.env and set OPENAI_API_KEY
+
 uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000
 ```
-Backend runs on: http://127.0.0.1:8000
-
-### 2. Start the Frontend
+Backend default: http://127.0.0.1:8000
+### 2) Frontend
 ```bash
+# From repo root
+npm install
+cp .env.example .env  # if not present; set tokens/keys as desired
 npm run dev
 ```
-Frontend runs on: http://localhost:8080
+Frontend: http://localhost:8080
 
 ### 3. Test the Chatbot
 1. Click "Open Sample" to load the VTOL flight log
