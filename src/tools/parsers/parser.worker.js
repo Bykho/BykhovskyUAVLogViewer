@@ -23,11 +23,15 @@ self.addEventListener('message', async function (event) {
         }
 
     } else if (event.data.action === 'loadType') {
-        if (!parser) {
-            console.warn('parser not ready; ignoring loadType', event.data && event.data.type)
+        if (!parser || typeof parser.loadType !== 'function') {
+            console.warn('parser not ready or loadType not available; ignoring loadType', event.data && event.data.type)
             return
         }
-        parser.loadType(event.data.type.split('[')[0])
+        try {
+            parser.loadType(event.data.type.split('[')[0])
+        } catch (error) {
+            console.warn('Error calling parser.loadType:', error)
+        }
     } else if (event.data.action === 'trimFile') {
         if (!parser) return
         parser.trimFile(event.data.time)

@@ -75,6 +75,9 @@ export default {
         this.state.currentTrajectory = []
         isOnline().then(a => { this.state.isOnline = a })
     },
+    mounted () {
+        console.log('🔥 Home component mounted at:', new Date().toISOString())
+    },
     beforeDestroy () {
         this.$eventHub.$off('messages')
     },
@@ -86,6 +89,7 @@ export default {
     },
     methods: {
         extractFlightData () {
+            console.log('🔥 extractFlightData called at:', new Date().toISOString())
             if (this.dataExtractor === null) {
                 if (this.state.logType === 'tlog') {
                     this.dataExtractor = MavlinkDataExtractor
@@ -198,7 +202,16 @@ export default {
             this.state.fences = this.dataExtractor.extractFences(this.state.messages)
 
             // Build and store session bundle for agent access
-            this.buildSessionBundle()
+            console.log('🔥 About to call buildSessionBundle from extractFlightData')
+
+            // Only build session bundle if we have meaningful telemetry data
+            const hasValidData = this.state.currentTrajectory && this.state.currentTrajectory.length > 0
+
+            if (hasValidData) {
+                this.buildSessionBundle()
+            } else {
+                console.log('🔥 Skipping session bundle - no trajectory data yet')
+            }
 
             this.state.processStatus = 'Processed!'
             this.state.processDone = true
@@ -234,6 +247,9 @@ export default {
             }
         },
         buildSessionBundle () {
+            console.log('🔥 buildSessionBundle called at:', new Date().toISOString())
+            console.log('🔥 Call stack:', new Error().stack)
+
             try {
                 const fileName = this.state.fileName || 'unknown'
                 const bundle = buildSessionBundle(this.state, fileName)
@@ -242,12 +258,7 @@ export default {
                 this.state.sessionBundle = bundle
                 this.state.sessionId = bundle.sessionId
 
-                console.log('Session bundle created:', {
-                    sessionId: bundle.sessionId,
-                    streams: Object.keys(bundle.index).length,
-                    events: bundle.events.length,
-                    duration: bundle.meta.durationMs
-                })
+                console.log('🔥 About to post session bundle:', bundle.sessionId)
 
                 // Post to backend
                 postSession(bundle).catch(error => {
