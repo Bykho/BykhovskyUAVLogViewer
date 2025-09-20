@@ -176,10 +176,6 @@ export default {
             const naturalMinWidth = this.initialSidebarWidth || 300
             const naturalMinHeight = startHeight
 
-            // Debug: log the initial state
-            console.log('Resize start - startWidth:', startWidth, 'startHeight:', startHeight)
-            console.log('naturalMinWidth:', naturalMinWidth, 'naturalMinHeight:', naturalMinHeight)
-
             const handleMouseMove = (e) => {
                 const deltaX = e.clientX - startX
                 const deltaY = e.clientY - startY
@@ -204,12 +200,6 @@ export default {
                     clampedWidth = Math.min(maxWidthConstraint, newWidth)
                     clampedHeight = Math.min(maxHeightConstraint, newHeight)
                 }
-
-                // Debug: log the calculation
-                console.log('Mouse move - deltaX:', deltaX, 'deltaY:', deltaY)
-                console.log('  - newWidth:', newWidth, 'newHeight:', newHeight)
-                console.log('  - hasSignificantMovement (>5px):', hasSignificantMovement)
-                console.log('  - clampedWidth:', clampedWidth, 'clampedHeight:', clampedHeight)
 
                 // Apply width changes to sidebar with !important to override CSS media queries
                 sidebar.style.setProperty('width', clampedWidth + 'px', 'important')
@@ -342,7 +332,10 @@ export default {
                 this.updateToolState(tool)
 
                 if (tool === 'telemetry_slice') {
-                    const sliceResult = await this.executeTelemetrySlice(params)
+                    const sliceResult = await this.executeTelemetrySlice({
+                        ...params,
+                        call_id: callId // eslint-disable-line camelcase
+                    })
                     this.updateToolState(tool, true)
                     await this.sendToolReply(callId, tool, sliceResult)
                 } else {
@@ -371,7 +364,10 @@ export default {
                 // Execute all bridge requests concurrently
                 const slicePromises = calls.map(async (call) => {
                     if (call.tool === 'telemetry_slice') {
-                        const sliceResult = await this.executeTelemetrySlice(call.params)
+                        const sliceResult = await this.executeTelemetrySlice({
+                            ...call.params,
+                            call_id: call.call_id // eslint-disable-line camelcase
+                        })
                         this.updateToolState(call.tool, true)
                         return { callId: call.call_id, tool: call.tool, result: sliceResult }
                     } else if (call.tool === 'analyze_flight_baseline') {
@@ -405,6 +401,7 @@ export default {
         },
         async executeTelemetrySlice (params) {
             const { stream, fields, start_ms: startMs, end_ms: endMs, max_points: maxPoints = 5000 } = params
+            const debugMode = true // Toggle for telemetry debugging
 
             console.log('Executing telemetry slice:', params)
 
@@ -452,9 +449,48 @@ export default {
                 }
             }
 
+            // Log RAW telemetry data
+            if (debugMode) {
+                const rawValues = messages[stream]
+                console.log('[TELEMETRY LOG]', {
+                    callId: params.call_id,
+                    stage: 'raw',
+                    stream: stream,
+                    fields: fields || Object.keys(rawValues || {}),
+                    sample: rawValues
+                        ? Object.keys(rawValues).reduce((acc, key) => {
+                            acc[key] = Array.isArray(rawValues[key])
+                                ? rawValues[key].slice(0, 5)
+                                : rawValues[key]
+                            return acc
+                        }, {})
+                        : {},
+                    notes: 'Raw telemetry data from store.messages'
+                })
+            }
+
             // Convert columnar data to records with unit conversions
             const records = this.convertMessageObjectToRecords(messages[stream], stream)
-            console.log('RAW telemetry_slice rel_alt', records.slice(0, 5).map(r => r.relative_alt))
+
+            // Log CONVERTED records
+            if (debugMode) {
+                console.log('[TELEMETRY LOG]', {
+                    callId: params.call_id,
+                    stage: 'converted',
+                    stream: stream,
+                    fields: fields || Object.keys(records[0] || {}),
+                    sample: records.slice(0, 5).map(r => {
+                        const out = {}
+                        const fieldsToLog = fields || Object.keys(r)
+                        fieldsToLog.forEach(f => {
+                            out[f] = r[f]
+                        })
+                        return out
+                    }),
+                    notes: 'Records after unit conversions and columnar->record transformation'
+                })
+            }
+
             if (records.length === 0) {
                 return {
                     ok: false,
@@ -472,7 +508,7 @@ export default {
             let filteredRecords = records
             if (startMs !== undefined || endMs !== undefined) {
                 filteredRecords = records.filter(record => {
-                    const t = record.time_boot_ms || record.TimeUS || record._timestamp || 0
+                    const t = record.tMs || 0
                     if (startMs !== undefined && t < startMs) return false
                     if (endMs !== undefined && t > endMs) return false
                     return true
@@ -489,6 +525,10 @@ export default {
                             filtered[field] = record[field]
                         }
                     })
+                    // Always preserve the canonical tMs field for timestamp tracking
+                    if (record.tMs !== undefined) {
+                        filtered.tMs = record.tMs
+                    }
                     return filtered
                 })
             }
@@ -501,9 +541,9 @@ export default {
             }
 
             // Calculate summary
-            const summary = this.calculateSliceSummary(processedRecords)
+            const summary = this.calculateSliceSummary(processedRecords, stream, params.call_id)
 
-            return {
+            const finalReply = {
                 ok: true,
                 stream: stream,
                 fields: fields || Object.keys(processedRecords[0] || {}),
@@ -513,6 +553,24 @@ export default {
                 summary: summary,
                 notes: truncated ? `Data truncated to ${maxPoints} points` : ''
             }
+
+            // Log FINAL REPLY
+            if (debugMode) {
+                console.log('[TELEMETRY LOG]', {
+                    callId: params.call_id,
+                    stage: 'reply',
+                    stream: stream,
+                    fields: finalReply.fields,
+                    sample: {
+                        count: finalReply.count,
+                        truncated: finalReply.truncated,
+                        summary: finalReply.summary
+                    },
+                    notes: 'Final reply sent back to backend/AI'
+                })
+            }
+
+            return finalReply
         },
         convertMessageObjectToRecords (messageObj, stream) {
             if (!messageObj || typeof messageObj !== 'object') return []
@@ -556,13 +614,28 @@ export default {
                         record[key] = value
                     }
                 }
+
+                // Add canonical tMs field to every record
+                if (record.time_boot_ms !== undefined) {
+                    record.tMs = record.time_boot_ms
+                } else if (record.time_usec !== undefined) {
+                    record.tMs = Math.floor(record.time_usec / 1000)
+                } else if (record.TimeUS !== undefined) {
+                    record.tMs = Math.floor(record.TimeUS / 1000)
+                } else if (record._timestamp !== undefined) {
+                    record.tMs = record._timestamp
+                } else {
+                    record.tMs = null
+                }
+
                 records.push(record)
             }
             return records
         },
-        calculateSliceSummary (records) {
+        calculateSliceSummary (records, stream = 'unknown', callId = null) {
             if (records.length === 0) return {}
 
+            const debugMode = true // Toggle for telemetry debugging
             const summary = {}
             const firstRecord = records[0]
             const lastRecord = records[records.length - 1]
@@ -579,13 +652,71 @@ export default {
                 typeof firstRecord[key] === 'number' && !isNaN(firstRecord[key])
             )
 
+            // Log SUMMARY INPUT
+            if (debugMode) {
+                console.log('[TELEMETRY LOG]', {
+                    stage: 'summary',
+                    stream,
+                    fields: numericFields,
+                    sample: records.slice(0, 5).map(r => {
+                        const out = {}
+                        numericFields.forEach(f => {
+                            out[f] = r[f]
+                        })
+                        return out
+                    }),
+                    notes: 'Records passed to summary calculation',
+                    callId
+                })
+            }
+
+            // Track min/max records with full record data for anomaly detection
+            const minMaxRecords = {}
+
             numericFields.forEach(field => {
                 const values = records.map(r => r[field]).filter(v => typeof v === 'number' && !isNaN(v))
                 if (values.length > 0) {
-                    summary[`${field}_min`] = Math.min(...values)
-                    summary[`${field}_max`] = Math.max(...values)
+                    const minValue = Math.min(...values)
+                    const maxValue = Math.max(...values)
+
+                    // Store enriched min/max data instead of just values
+                    summary[`${field}_min`] = minValue
+                    summary[`${field}_max`] = maxValue
+
+                    // Find the records that produced min/max values
+                    const minRecord = records.find(r => r[field] === minValue)
+                    const maxRecord = records.find(r => r[field] === maxValue)
+
+                    minMaxRecords[field] = {
+                        min: {
+                            value: minValue,
+                            tMs: minRecord?.tMs,
+                            record: minRecord
+                        },
+                        max: {
+                            value: maxValue,
+                            tMs: maxRecord?.tMs,
+                            record: maxRecord
+                        }
+                    }
                 }
             })
+
+            // Add enriched min/max records to summary for downstream use
+            summary.minMaxRecords = minMaxRecords
+
+            // Log SUMMARY OUTPUT with time info for anomalies
+            if (debugMode) {
+                console.log('[TELEMETRY LOG]', {
+                    stage: 'summary',
+                    stream,
+                    fields: numericFields,
+                    sample: summary,
+                    notes: 'Summary statistics calculated (min/max values)',
+                    minMaxRecords,
+                    callId
+                })
+            }
 
             return summary
         },

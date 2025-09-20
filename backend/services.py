@@ -7,6 +7,21 @@ from models import (
     ToolReplyRequest, ToolReplyResponse, MetricResult,
     SessionBundle, SessionResponse
 )
+from metrics_compute import (
+    metrics_compute_max_altitude,
+    metrics_compute_flight_time,
+    metrics_compute_first_gps_loss,
+    metrics_compute_max_battery_temp,
+    metrics_compute_first_rc_loss,
+    metrics_compute_critical_errors,
+    metrics_compute_available_streams,
+    metrics_compute_missing_segments
+)
+
+from prompts import (
+    TOOL_DEFINITIONS,
+    TOOL_SYSTEM_PROMPT
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -22,225 +37,6 @@ TOOL_FUNCTIONS = {
     "detect_statistical_outliers": None,
     "trace_causal_chains": None,
 }
-
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "telemetry_index",
-            "description": "Get stream inventory and metadata for a session",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {
-                        "type": "string",
-                        "description": "The session ID to inspect"
-                    }
-                },
-                "required": ["sessionId"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "metrics_compute",
-            "description": "Compute specific metrics from telemetry data",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {
-                        "type": "string",
-                        "description": "The session ID to analyze"
-                    },
-                    "metric": {
-                        "type": "string",
-                        "enum": ["max_altitude", "flight_time", "first_gps_loss", "first_rc_loss", "max_battery_temp", "critical_errors", "available_streams", "missing_segments"],
-                        "description": "The metric to compute"
-                    }
-                },
-                "required": ["sessionId", "metric"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "telemetry_slice",
-            "description": "Get high-resolution telemetry data for a specific stream and time window",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {
-                        "type": "string",
-                        "description": "The session ID to analyze"
-                    },
-                    "stream": {
-                        "type": "string",
-                        "description": "The telemetry stream name (e.g., GLOBAL_POSITION_INT, GPS_RAW_INT)"
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional array of specific fields to include"
-                    },
-                    "start_ms": {
-                        "type": "number",
-                        "description": "Start time in milliseconds (optional)"
-                    },
-                    "end_ms": {
-                        "type": "number",
-                        "description": "End time in milliseconds (optional)"
-                    },
-                    "max_points": {
-                        "type": "number",
-                        "description": "Maximum number of data points to return (default: 5000)"
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["raw", "downsample"],
-                        "description": "Data processing mode (default: raw)"
-                    }
-                },
-                "required": ["sessionId", "stream"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_flight_baseline",
-            "description": "Calculate statistical baselines for telemetry streams within a flight",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {
-                        "type": "string",
-                        "description": "The session ID to analyze"
-                    },
-                    "stream": {
-                        "type": "string",
-                        "description": "The telemetry stream name (e.g., GLOBAL_POSITION_INT, GPS_RAW_INT)"
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Array of specific fields to analyze"
-                    },
-                    "window_size_ms": {
-                        "type": "number",
-                        "description": "Rolling window size in milliseconds (default: 30000)"
-                    }
-                },
-                "required": ["sessionId", "stream", "fields"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "detect_statistical_outliers",
-            "description": "Detect statistical outliers in telemetry data using dynamic thresholds",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {
-                        "type": "string",
-                        "description": "The session ID to analyze"
-                    },
-                    "stream": {
-                        "type": "string",
-                        "description": "The telemetry stream name"
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Array of specific fields to analyze for outliers"
-                    },
-                    "threshold_sigma": {
-                        "type": "number",
-                        "description": "Number of standard deviations for outlier detection (default: 2.5)"
-                    },
-                    "window_size_ms": {
-                        "type": "number",
-                        "description": "Rolling window size in milliseconds (default: 30000)"
-                    }
-                },
-                "required": ["sessionId", "stream", "fields"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "trace_causal_chains",
-            "description": "Find STATUSTEXT events that may be causally related to a target timestamp",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sessionId": {"type": "string", "description": "The session ID to analyze"},
-                    "target_timestamp_ms": {"type": "number", "description": "Timestamp to investigate"},
-                    "time_window_ms": {"type": "number", "description": "Search window in milliseconds (default: 30000)"}
-                },
-                "required": ["sessionId", "target_timestamp_ms"]
-            }
-        }
-    }
-]
-TOOL_SYSTEM_PROMPT = """You are a UAV telemetry analyst. Use tools to inspect data and compute answers deterministically.
-
-Guidelines:
-- Use metrics_compute for summary stats like altitude, flight time, GPS loss
-- Use telemetry_index to discover what data is available
-- When you need raw/high-res data in a window, call telemetry_slice with specific stream, fields, and tight time bounds
-- Use analyze_flight_baseline to calculate statistical baselines for telemetry streams
-- Use detect_statistical_outliers to identify anomalies using dynamic thresholds
-- Use trace_causal_chains to find STATUSTEXT events related to specific timestamps
-- Prefer small windows first; expand only if needed
-- Treat "altitude" as relative altitude from GLOBAL_POSITION_INT.relative_alt (in meters); if unavailable, fall back to VFR_HUD.alt (meters).
-- Be factual and precise
-- Units: meters (m), m/s, volts (V)
-- Time: t_ms (milliseconds)
-- If data is missing, say so clearly
-
-Investigation Workflows:
-When users ask broad investigative questions, follow these structured patterns:
-
-- "Are there any anomalies?" or "What looks unusual?" → Start with metrics_compute for missing_segments to check for big data gaps (≥5s), then report those timestamps. Only use detect_statistical_outliers if user specifically asks about spikes or outliers.
-- "What went wrong?" or "What caused problems?" → First use metrics_compute for critical_errors and missing_segments, then trace_causal_chains around error timestamps  
-- "Analyze this flight" or "Give me an overview" → Begin with telemetry_index to see available data, then metrics_compute for key metrics (max_altitude, flight_time, critical_errors, missing_segments)
-- For any big gaps found, mention them with timestamps and durations. Do not automatically run outlier detection unless specifically requested.
-- Focus on data gaps first - they are often the most significant anomalies in flight data
-- When listing altitude values over a window, follow the Retrieval rules above and state which source was used ("relative_alt" or "VFR_HUD.alt"). Do not mix sources within one answer unless the user explicitly requests a comparison.
-- When a user asks about turns, you can use the attitude data from the UAV to investigate orientation, which could imply turning.
-
-Correlation Analysis Guidelines:
-- For velocity/event correlation questions → Use detect_statistical_outliers on velocity fields to find significant changes, then use trace_causal_chains around those outlier timestamps to correlate with events
-- Always perform quantitative analysis rather than just descriptive comparisons
-- Focus on temporal relationships between telemetry changes and events
-
-Severity Classification:
-- HIGH: Critical safety issues, system failures, significant deviations (>3σ)
-- MEDIUM: Notable outliers, operational anomalies (2.5-3σ)  
-- LOW: Minor deviations, normal operational variations (<2.5σ)
-
-Always synthesize findings into a coherent narrative rather than just listing tool results. Prioritize HIGH severity findings first.
-
-IMPORTANT: When calling tools, use the exact sessionId provided in the user's request. Do not use placeholder values.
-
-When answering:
-1. Use the appropriate tool to get the data
-2. Provide a clear, concise answer with specific values and units
-3. Include timestamps when relevant
-4. If a metric cannot be computed, explain why
-
-Methodology Reporting:
-When using statistical analysis tools (analyze_flight_baseline, detect_statistical_outliers), incorporate the detailed methodology reports into your responses:
-- Include "Baseline Analysis" and "Statistical Findings" sections with clear headers
-- Present both conclusions and analytical steps in conversational format
-- Explain the statistical methods used (rolling windows, confidence intervals, outlier thresholds)
-- Include data quality assessments and confidence scores
-- Make the analysis transparent and trustworthy by showing your work"""
 
 
 def telemetry_index(session_id: str) -> Dict[str, Any]:
@@ -261,8 +57,6 @@ def telemetry_index(session_id: str) -> Dict[str, Any]:
         "event_count": len(session.events),
         "downsample_available": list(session.downsample1Hz.keys())
     }
-
-
 
 
 
@@ -286,498 +80,6 @@ def telemetry_index(session_id: str) -> Dict[str, Any]:
         "downsample_available": list(session.downsample1Hz.keys())
     }
 
-def metrics_compute_max_altitude(session: SessionBundle) -> MetricResult:
-    """Compute maximum altitude from session data"""
-    try:
-        # Try VFR_HUD altitude first
-        alt_data = session.downsample1Hz.get("alt", [])
-        if alt_data:
-            max_alt = max((item["altM"] for item in alt_data if item.get("altM") is not None), default=None)
-            if max_alt is not None:
-                # Find the timestamp of max altitude
-                max_item = max((item for item in alt_data if item.get("altM") == max_alt), key=lambda x: x.get("t", 0))
-                return MetricResult(
-                    name="max_altitude",
-                    ok=True,
-                    value=round(max_alt, 1),
-                    units="m",
-                    t_ms=max_item.get("t"),
-                    method="VFR_HUD.alt (1Hz extrema-preserving downsample)",
-                    source="downsample1Hz.alt",
-                    notes=""
-                )
-        
-        # Fallback to GLOBAL_POSITION_INT relative altitude
-        gpos_data = session.downsample1Hz.get("gpos", [])
-        if gpos_data:
-            max_rel_alt = max((item["relAltM"] for item in gpos_data if item.get("relAltM") is not None), default=None)
-            if max_rel_alt is not None:
-                max_item = max((item for item in gpos_data if item.get("relAltM") == max_rel_alt), key=lambda x: x.get("t", 0))
-                return MetricResult(
-                    name="max_altitude",
-                    ok=True,
-                    value=round(max_rel_alt, 1),
-                    units="m",
-                    t_ms=max_item.get("t"),
-                    method="GLOBAL_POSITION_INT.relative_alt/1000 (1Hz extrema-preserving downsample)",
-                    source="downsample1Hz.gpos",
-                    notes="Using relative altitude as fallback"
-                )
-        
-        return MetricResult(
-            name="max_altitude",
-            ok=False,
-            value=None,
-            units="m",
-            t_ms=None,
-            method="",
-            source="",
-            notes="No altitude data available in VFR_HUD or GLOBAL_POSITION_INT"
-        )
-    except Exception as e:
-        return MetricResult(
-            name="max_altitude",
-            ok=False,
-            value=None,
-            units="m",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing max altitude: {str(e)}"
-        )
-
-def metrics_compute_flight_time(session: SessionBundle) -> MetricResult:
-    """Compute flight time from session metadata"""
-    try:
-        meta = session.meta
-        t_start = meta.get("tStartMs")
-        t_end = meta.get("tEndMs")
-        
-        if t_start is not None and t_end is not None and t_end > t_start:
-            duration_ms = t_end - t_start
-            duration_s = duration_ms / 1000.0
-            return MetricResult(
-                name="flight_time",
-                ok=True,
-                value=round(duration_s, 1),
-                units="s",
-                t_ms=None,
-                method="tEndMs - tStartMs from session metadata",
-                source="session.meta",
-                notes=""
-            )
-        
-        return MetricResult(
-            name="flight_time",
-            ok=False,
-            value=None,
-            units="s",
-            t_ms=None,
-            method="",
-            source="",
-            notes="Invalid or missing timestamp data in session metadata"
-        )
-    except Exception as e:
-        return MetricResult(
-            name="flight_time",
-            ok=False,
-            value=None,
-            units="s",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing flight time: {str(e)}"
-        )
-
-def metrics_compute_first_gps_loss(session: SessionBundle) -> MetricResult:
-    """Find first GPS loss (fix_type < 3)"""
-    try:
-        gps_data = session.downsample1Hz.get("gps", [])
-        if not gps_data:
-            return MetricResult(
-                name="first_gps_loss",
-                ok=False,
-                value=None,
-                units="",
-                t_ms=None,
-                method="",
-                source="",
-                notes="No GPS data available"
-            )
-        
-        # Find first occurrence where fix < 3
-        for item in sorted(gps_data, key=lambda x: x.get("t", 0)):
-            fix = item.get("fix")
-            if fix is not None and fix < 3:
-                return MetricResult(
-                    name="first_gps_loss",
-                    ok=True,
-                    value=fix,
-                    units="fix_type",
-                    t_ms=item.get("t"),
-                    method="First GPS_RAW_INT.fix_type < 3",
-                    source="downsample1Hz.gps",
-                    notes=f"GPS fix dropped to {fix}"
-                )
-        
-        return MetricResult(
-            name="first_gps_loss",
-            ok=True,
-            value=None,
-            units="",
-            t_ms=None,
-            method="GPS_RAW_INT.fix_type analysis",
-            source="downsample1Hz.gps",
-            notes="No GPS loss detected (all fix_type >= 3)"
-        )
-    except Exception as e:
-        return MetricResult(
-            name="first_gps_loss",
-            ok=False,
-            value=None,
-            units="",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing first GPS loss: {str(e)}"
-        )
-
-def metrics_compute_max_battery_temp(session: SessionBundle) -> MetricResult:
-    """Find maximum battery temperature from session data"""
-    try:
-        # Check multiple possible battery streams
-        battery_streams = ["BATTERY_STATUS", "SYS_STATUS", "BAT", "BATT", "BATTERY"]
-        max_temp = None
-        max_temp_t_ms = None
-        source_used = ""
-        method_used = ""
-        
-        # First check downsample1Hz data
-        # Check the new battery section first
-        if "battery" in session.downsample1Hz:
-            battery_data = session.downsample1Hz["battery"]
-            if battery_data:
-                for item in battery_data:
-                    if "temp" in item and item["temp"] is not None:
-                        temp_val = float(item["temp"])
-                        if max_temp is None or temp_val > max_temp:
-                            max_temp = temp_val
-                            max_temp_t_ms = item.get("t")
-                            source_used = "downsample1Hz.battery"
-                            method_used = "Max of temp field from battery stream"
-        
-        # Also check individual battery streams
-        for stream_name in battery_streams:
-            if stream_name.lower() in session.downsample1Hz:
-                stream_data = session.downsample1Hz[stream_name.lower()]
-                if stream_data:
-                    # Look for temperature fields
-                    temp_fields = ["temp", "temperature", "tempC", "temp_c", "battery_temp"]
-                    for item in stream_data:
-                        for field in temp_fields:
-                            if field in item and item[field] is not None:
-                                temp_val = float(item[field])
-                                if max_temp is None or temp_val > max_temp:
-                                    max_temp = temp_val
-                                    max_temp_t_ms = item.get("t")
-                                    source_used = f"downsample1Hz.{stream_name.lower()}"
-                                    method_used = f"Max of {field} field from {stream_name} stream"
-        
-        # If not found in downsample1Hz, check raw index for available streams
-        if max_temp is None:
-            available_streams = []
-            for stream_name in battery_streams:
-                if stream_name in session.index:
-                    available_streams.append(stream_name)
-            
-            if available_streams:
-                return MetricResult(
-                    name="max_battery_temp",
-                    ok=False,
-                    value=None,
-                    units="°C",
-                    t_ms=None,
-                    method=f"Checked streams: {', '.join(available_streams)}",
-                    source="session.index",
-                    notes="Battery temperature data found in streams but not processed in downsample1Hz. Raw data available for telemetry_slice analysis."
-                )
-            else:
-                return MetricResult(
-                    name="max_battery_temp",
-                    ok=False,
-                    value=None,
-                    units="°C",
-                    t_ms=None,
-                    method="Checked standard battery streams",
-                    source="session.index",
-                    notes="No battery temperature streams found. Checked: BATTERY_STATUS, SYS_STATUS, BAT, BATT, BATTERY"
-                )
-        
-        return MetricResult(
-            name="max_battery_temp",
-            ok=True,
-            value=round(max_temp, 1),
-            units="°C",
-            t_ms=max_temp_t_ms,
-            method=method_used,
-            source=source_used,
-            notes=""
-        )
-        
-    except Exception as e:
-        return MetricResult(
-            name="max_battery_temp",
-            ok=False,
-            value=None,
-            units="°C",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing max battery temperature: {str(e)}"
-        )
-
-def metrics_compute_first_rc_loss(session: SessionBundle) -> MetricResult:
-    """Find first RC signal loss from session data"""
-    try:
-        # Strategy 1: Check STATUSTEXT events for RC-related messages
-        rc_loss_events = []
-        for event in session.events:
-            if event.get("text"):
-                text = event["text"].upper()
-                if ("RC" in text and ("FAILSAFE" in text or "LOST" in text or "DISCONNECT" in text)):
-                    rc_loss_events.append({
-                        "t_ms": event.get("t"),
-                        "severity": event.get("severity"),
-                        "text": event.get("text")
-                    })
-        
-        if rc_loss_events:
-            # Sort by timestamp and return first
-            rc_loss_events.sort(key=lambda x: x.get("t_ms", 0))
-            first_event = rc_loss_events[0]
-            return MetricResult(
-                name="first_rc_loss",
-                ok=True,
-                value=1,  # Indicates RC loss detected
-                units="detected",
-                t_ms=first_event["t_ms"],
-                method="STATUSTEXT event analysis",
-                source="session.events",
-                notes=f"RC loss detected via status message: '{first_event['text']}'"
-            )
-        
-        # Strategy 2: Check for RC_CHANNELS stream in index
-        if "RC_CHANNELS" in session.index:
-            return MetricResult(
-                name="first_rc_loss",
-                ok=False,
-                value=None,
-                units="",
-                t_ms=None,
-                method="RC_CHANNELS stream analysis",
-                source="session.index",
-                notes="RC_CHANNELS stream available but not processed in downsample1Hz. Use telemetry_slice to analyze RC channel values for failsafe detection."
-            )
-        
-        # Strategy 3: Check for SYS_STATUS stream
-        if "SYS_STATUS" in session.index:
-            return MetricResult(
-                name="first_rc_loss",
-                ok=False,
-                value=None,
-                units="",
-                t_ms=None,
-                method="SYS_STATUS stream analysis",
-                source="session.index",
-                notes="SYS_STATUS stream available but not processed in downsample1Hz. Use telemetry_slice to analyze RC_RECEIVER status bits."
-            )
-        
-        # No RC loss detected and no RC-related streams
-        return MetricResult(
-            name="first_rc_loss",
-            ok=True,
-            value=None,
-            units="",
-            t_ms=None,
-            method="STATUSTEXT event analysis",
-            source="session.events",
-            notes="No RC signal loss detected in status messages. No RC_CHANNELS or SYS_STATUS streams available for detailed analysis."
-        )
-        
-    except Exception as e:
-        return MetricResult(
-            name="first_rc_loss",
-            ok=False,
-            value=None,
-            units="",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing first RC loss: {str(e)}"
-        )
-
-def metrics_compute_critical_errors(session: SessionBundle) -> MetricResult:
-    """Find all critical errors from session events"""
-    try:
-        critical_keywords = [
-            "FAILSAFE", "GPS", "EKF", "BATTERY", "CRASH", "VIBRATION", 
-            "COMPASS", "GYRO", "ACCEL", "ERROR", "CRITICAL", "WARNING"
-        ]
-        
-        critical_events = []
-        
-        for event in session.events:
-            if not event.get("text"):
-                continue
-                
-            text = event["text"].upper()
-            severity = event.get("severity")
-            
-            # Check severity level (0-3 are critical)
-            is_critical_severity = severity is not None and severity <= 3
-            
-            # Check for critical keywords
-            has_critical_keyword = any(keyword in text for keyword in critical_keywords)
-            
-            if is_critical_severity or has_critical_keyword:
-                critical_events.append({
-                    "t_ms": event.get("t"),
-                    "severity": severity,
-                    "text": event.get("text")
-                })
-        
-        # Sort by timestamp
-        critical_events.sort(key=lambda x: x.get("t_ms", 0))
-        
-        return MetricResult(
-            name="critical_errors",
-            ok=True,
-            value=len(critical_events),  # Count of critical events
-            units="count",
-            t_ms=critical_events[0]["t_ms"] if critical_events else None,
-            method="STATUSTEXT event analysis with severity and keyword filtering",
-            source="session.events",
-            notes=f"Found {len(critical_events)} critical events. Keywords checked: {', '.join(critical_keywords)}"
-        )
-        
-    except Exception as e:
-        return MetricResult(
-            name="critical_errors",
-            ok=False,
-            value=None,
-            units="count",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing critical errors: {str(e)}"
-        )
-
-def metrics_compute_available_streams(session: SessionBundle) -> MetricResult:
-    """Get list of available telemetry streams in the session"""
-    try:
-        streams = list(session.index.keys())
-        streams.sort()
-        
-        # Categorize streams
-        categories = {
-            "position": [],
-            "attitude": [],
-            "battery": [],
-            "rc": [],
-            "gps": [],
-            "system": [],
-            "other": []
-        }
-        
-        for stream in streams:
-            stream_upper = stream.upper()
-            if any(x in stream_upper for x in ["POSITION", "GPS", "LOCAL"]):
-                categories["position"].append(stream)
-            elif any(x in stream_upper for x in ["ATTITUDE", "ATT", "EULER", "QUATERNION"]):
-                categories["attitude"].append(stream)
-            elif any(x in stream_upper for x in ["BATTERY", "BAT", "BATT", "SYS_STATUS"]):
-                categories["battery"].append(stream)
-            elif any(x in stream_upper for x in ["RC", "CHANNEL", "RADIO"]):
-                categories["rc"].append(stream)
-            elif "GPS" in stream_upper:
-                categories["gps"].append(stream)
-            elif any(x in stream_upper for x in ["SYS", "STATUS", "HEARTBEAT", "PARAM"]):
-                categories["system"].append(stream)
-            else:
-                categories["other"].append(stream)
-        
-        return MetricResult(
-            name="available_streams",
-            ok=True,
-            value=len(streams),
-            units="count",
-            t_ms=None,
-            method="Session index analysis",
-            source="session.index",
-            notes=f"Total streams: {len(streams)}. Categories: {', '.join([f'{k}: {len(v)}' for k, v in categories.items() if v])}"
-        )
-        
-    except Exception as e:
-        return MetricResult(
-            name="available_streams",
-            ok=False,
-            value=None,
-            units="count",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing available streams: {str(e)}"
-        )
-
-def metrics_compute_missing_segments(session: SessionBundle) -> MetricResult:
-    """Find big gaps (≥5s) in telemetry streams"""
-    try:
-        if not session.gaps:
-            return MetricResult(
-                name="missing_segments",
-                ok=True,
-                value=0,
-                units="count",
-                t_ms=None,
-                method="Big gap analysis (≥5s only)",
-                source="session.gaps",
-                notes="No gap data available"
-            )
-        
-        # Collect only big gaps (≥5s) from all streams
-        gaps = []
-        for stream, arr in session.gaps.items():
-            for g in arr or []:
-                if g.get("durationMs", 0) >= 5000:  # Only gaps ≥5 seconds
-                    gaps.append({"stream": stream, **g})
-        
-        # Sort by start time
-        gaps.sort(key=lambda x: x.get('startMs', 0))
-        
-        return MetricResult(
-            name="missing_segments",
-            ok=True,
-            value=len(gaps),
-            units="count",
-            t_ms=None,
-            method="Big gap analysis (≥5s only)",
-            source="session.gaps",
-            notes=f"Found {len(gaps)} big gaps (≥5s). " +
-                  (f"Gaps: {[f'{g['stream']}@{g['startMs']}ms({g['durationMs']}ms)' for g in gaps[:5]]}" if gaps else "No big gaps found.")
-        )
-        
-    except Exception as e:
-        return MetricResult(
-            name="missing_segments",
-            ok=False,
-            value=None,
-            units="count",
-            t_ms=None,
-            method="",
-            source="",
-            notes=f"Error computing missing segments: {str(e)}"
-        )
-
 
 def metrics_compute(session_id: str, metric: str) -> MetricResult:
     """Compute specific metric from session data"""
@@ -794,7 +96,6 @@ def metrics_compute(session_id: str, metric: str) -> MetricResult:
         )
     
     session = sessions[session_id]
-    
     if metric == "max_altitude":
         return metrics_compute_max_altitude(session)
     elif metric == "flight_time":
@@ -822,6 +123,7 @@ def metrics_compute(session_id: str, metric: str) -> MetricResult:
             source="",
             notes=f"Unknown metric: {metric}"
         )
+
 
 # Helper function to clean data for JSON serialization
 def clean_for_json_serialization(data):
@@ -910,6 +212,7 @@ def get_telemetry_data_internal(session_id: str, stream: str, fields: List[str] 
         "fields": fields or list(records[0].keys()) if records else []
     }
 
+
 def calculate_rolling_statistics(rows: List[Dict], fields: List[str], window_size_ms: int) -> Dict[str, Any]:
     """Calculate rolling statistics for telemetry data"""
     if not rows:
@@ -982,6 +285,185 @@ def calculate_rolling_statistics(rows: List[Dict], fields: List[str], window_siz
         "num_windows": num_windows,
         "windows": windows
     }
+
+
+# Pure analysis functions - operate on raw telemetry data without backend dependencies
+
+def analyze_statistical_outliers_pure(data: Dict, fields: List[str], threshold_sigma: float, window_size_ms: int) -> Dict[str, Any]:
+    """Analyze telemetry data for statistical outliers - pure function version"""
+    rows = data.get('rows', [])
+    stream = data.get('stream', 'unknown')
+    
+    if not rows:
+        return {
+            "ok": False,
+            "error": "No data provided",
+            "methodology": "Data validation",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": "No records in dataset"
+        }
+    
+    if len(rows) < 10:
+        return {
+            "ok": False,
+            "error": f"Insufficient data for analysis: {len(rows)} records",
+            "methodology": "Data sufficiency check",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Only {len(rows)} records available, need at least 10"
+        }
+    
+    try:
+        # Detect outliers using dynamic thresholds
+        outlier_results = detect_outliers_with_dynamic_thresholds(rows, fields, threshold_sigma, window_size_ms)
+        
+        return {
+            "ok": True,
+            "methodology": f"Dynamic threshold outlier detection using {threshold_sigma}σ thresholds. " +
+                          f"Analyzed {len(rows)} records in {window_size_ms}ms windows. " +
+                          f"Outliers identified as points exceeding {threshold_sigma} standard deviations from rolling mean.",
+            "findings": outlier_results,
+            "confidence": min(1.0, len(rows) / 500.0),
+            "data_quality": f"Stream {stream} analyzed for outliers. " +
+                           f"{outlier_results.get('total_outliers', 0)} outliers found out of {len(rows)} total records."
+        }
+        
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Outlier detection failed: {str(e)}",
+            "methodology": "Statistical analysis execution",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Exception during analysis: {str(e)}"
+        }
+
+
+def analyze_baseline_pure(data: Dict, fields: List[str], window_size_ms: int) -> Dict[str, Any]:
+    """Analyze telemetry data for baselines - pure function version"""
+    rows = data.get('rows', [])
+    stream = data.get('stream', 'unknown')
+    
+    if not rows:
+        return {
+            "ok": False,
+            "error": "No data provided",
+            "methodology": "Data validation",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": "No records in dataset"
+        }
+    
+    if len(rows) < 10:
+        return {
+            "ok": False,
+            "error": f"Insufficient data for analysis: {len(rows)} records",
+            "methodology": "Data sufficiency check",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Only {len(rows)} records available, need at least 10"
+        }
+    
+    try:
+        # Calculate rolling statistics
+        baseline_results = calculate_rolling_statistics(rows, fields, window_size_ms)
+        
+        return {
+            "ok": True,
+            "methodology": f"Rolling window analysis with {window_size_ms}ms windows. " +
+                          f"Analyzed {len(rows)} records across {len(baseline_results['windows'])} windows. " +
+                          f"Calculated mean, std dev, and basic statistics for {len(fields)} fields.",
+            "findings": baseline_results,
+            "confidence": min(1.0, len(rows) / 1000.0),
+            "data_quality": f"Stream {stream} contains {len(rows)} records. " +
+                           f"Data density: {len(rows) / (baseline_results.get('duration_ms', 1) / 1000):.1f} Hz"
+        }
+        
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Analysis failed: {str(e)}",
+            "methodology": "Statistical analysis execution",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Exception during analysis: {str(e)}"
+        }
+
+
+def trace_causal_chains_pure(data: Dict, target_timestamp_ms: int, time_window_ms: int = 30000) -> Dict[str, Any]:
+    """Find STATUSTEXT events that may be causally related to a target timestamp - pure function version"""
+    events = data.get('events', [])
+    stream = data.get('stream', 'unknown')
+    
+    if not events:
+        return {
+            "ok": False,
+            "error": "No events provided",
+            "methodology": "Data validation",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": "No events in dataset"
+        }
+    
+    try:
+        # Search for STATUSTEXT events within the time window
+        nearby_events = []
+        window_start = target_timestamp_ms - time_window_ms
+        window_end = target_timestamp_ms + time_window_ms
+        
+        # Look through events for STATUSTEXT messages
+        for event in events:
+            if event.get("text"):  # Check if the event has text content
+                event_time = event.get("t", 0)  # Use "t" for timestamp
+                
+                # Check if event is within time window
+                if window_start <= event_time <= window_end:
+                    time_delta = event_time - target_timestamp_ms
+                    nearby_events.append({
+                        "timestamp_ms": event_time,
+                        "text": event.get("text", ""),
+                        "severity": event.get("severity", 0),
+                        "time_delta_ms": time_delta,
+                        "time_delta_seconds": round(time_delta / 1000, 1),
+                        "direction": "before" if time_delta < 0 else "after"
+                    })
+        
+        # Sort by proximity to target timestamp
+        nearby_events.sort(key=lambda x: abs(x["time_delta_ms"]))
+        
+        # Calculate proximity ranking
+        for i, event in enumerate(nearby_events):
+            event["proximity_rank"] = i + 1
+        
+        return {
+            "ok": True,
+            "methodology": f"Event correlation analysis for timestamp {target_timestamp_ms}. " +
+                          f"Searched for STATUSTEXT events within ±{time_window_ms}ms window. " +
+                          f"Found {len(nearby_events)} events, sorted by temporal proximity.",
+            "findings": {
+                "target_timestamp_ms": target_timestamp_ms,
+                "time_window_ms": time_window_ms,
+                "events_found": len(nearby_events),
+                "nearby_events": nearby_events
+            },
+            "confidence": min(1.0, len(nearby_events) / 10.0),  # Higher confidence with more events
+            "data_quality": f"Analyzed {len(events)} total events in dataset. " +
+                           f"Found {len(nearby_events)} STATUSTEXT events within ±{time_window_ms}ms of target."
+        }
+        
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Event correlation failed: {str(e)}",
+            "methodology": "Event correlation execution",
+            "findings": {},
+            "confidence": 0.0,
+            "data_quality": f"Exception during analysis: {str(e)}"
+        }
+
+
+# Original helper functions (now used by pure functions)
 
 def detect_outliers_with_dynamic_thresholds(rows: List[Dict], fields: List[str], 
                                           threshold_sigma: float, window_size_ms: int) -> Dict[str, Any]:
@@ -1068,9 +550,10 @@ def detect_outliers_with_dynamic_thresholds(rows: List[Dict], fields: List[str],
         "total_outliers": total_outliers
     }
 
+
 # Statistical analysis functions that use telemetry_slice internally
 def analyze_flight_baseline_impl(session_id: str, stream: str, fields: List[str], window_size_ms: int = 30000) -> Dict[str, Any]:
-    """Calculate statistical baselines for telemetry streams within a flight"""
+    """Calculate statistical baselines for telemetry streams within a flight - returns bridge request"""
     if session_id not in sessions:
         return {
             "ok": False,
@@ -1081,62 +564,27 @@ def analyze_flight_baseline_impl(session_id: str, stream: str, fields: List[str]
             "data_quality": "Session not found"
         }
     
-    session = sessions[session_id]
-    
-    try:
-        # Use telemetry_slice internally to get data
-        # This calls the same logic that the frontend telemetry_slice uses
-        slice_result = get_telemetry_data_internal(session_id, stream, fields, max_points=10000)
-        
-        if not slice_result.get("ok", False):
-            return {
-                "ok": False,
-                "error": f"Failed to get data for stream {stream}",
-                "methodology": "Data access via internal telemetry_slice",
-                "findings": {},
-                "confidence": 0.0,
-                "data_quality": slice_result.get("error", "Data access failed")
-            }
-        
-        # Perform rolling window analysis on the data
-        rows = slice_result.get("rows", [])
-        if len(rows) < 10:
-            return {
-                "ok": False,
-                "error": f"Insufficient data for analysis: {len(rows)} records",
-                "methodology": "Data sufficiency check",
-                "findings": {},
-                "confidence": 0.0,
-                "data_quality": f"Only {len(rows)} records available, need at least 10"
-            }
-        
-        # Calculate rolling statistics
-        baseline_results = calculate_rolling_statistics(rows, fields, window_size_ms)
-        
-        return {
-            "ok": True,
-            "methodology": f"Rolling window analysis with {window_size_ms}ms windows. " +
-                          f"Analyzed {len(rows)} records across {len(baseline_results['windows'])} windows. " +
-                          f"Calculated mean, std dev, and basic statistics for {len(fields)} fields.",
-            "findings": baseline_results,
-            "confidence": min(1.0, len(rows) / 1000.0),
-            "data_quality": f"Stream {stream} contains {len(rows)} records. " +
-                           f"Data density: {len(rows) / (baseline_results.get('duration_ms', 1) / 1000):.1f} Hz"
+    # Return bridge request instead of fetching data
+    return {
+        "type": "bridge_request_with_analysis",
+        "tool": "telemetry_slice",
+        "analysis_tool": "analyze_flight_baseline",
+        "params": {
+            "sessionId": session_id,
+            "stream": stream,
+            "fields": fields,
+            "max_points": 10000
+        },
+        "analysis_params": {
+            "fields": fields,
+            "window_size_ms": window_size_ms
         }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Analysis failed: {str(e)}",
-            "methodology": "Statistical analysis execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
+    }
+
 
 def detect_statistical_outliers_impl(session_id: str, stream: str, fields: List[str], 
                                    threshold_sigma: float = 2.5, window_size_ms: int = 30000) -> Dict[str, Any]:
-    """Detect statistical outliers in telemetry data using dynamic thresholds"""
+    """Detect statistical outliers in telemetry data using dynamic thresholds - returns bridge request"""
     if session_id not in sessions:
         return {
             "ok": False,
@@ -1147,59 +595,27 @@ def detect_statistical_outliers_impl(session_id: str, stream: str, fields: List[
             "data_quality": "Session not found"
         }
     
-    session = sessions[session_id]
-    
-    try:
-        # Use telemetry_slice internally to get data
-        slice_result = get_telemetry_data_internal(session_id, stream, fields, max_points=10000)
-        
-        if not slice_result.get("ok", False):
-            return {
-                "ok": False,
-                "error": f"Failed to get data for stream {stream}",
-                "methodology": "Data access via internal telemetry_slice",
-                "findings": {},
-                "confidence": 0.0,
-                "data_quality": slice_result.get("error", "Data access failed")
-            }
-        
-        rows = slice_result.get("rows", [])
-        if len(rows) < 10:
-            return {
-                "ok": False,
-                "error": f"Insufficient data for analysis: {len(rows)} records",
-                "methodology": "Data sufficiency check",
-                "findings": {},
-                "confidence": 0.0,
-                "data_quality": f"Only {len(rows)} records available, need at least 10"
-            }
-        
-        # Detect outliers using dynamic thresholds
-        outlier_results = detect_outliers_with_dynamic_thresholds(rows, fields, threshold_sigma, window_size_ms)
-        
-        return {
-            "ok": True,
-            "methodology": f"Dynamic threshold outlier detection using {threshold_sigma}σ thresholds. " +
-                          f"Analyzed {len(rows)} records in {window_size_ms}ms windows. " +
-                          f"Outliers identified as points exceeding {threshold_sigma} standard deviations from rolling mean.",
-            "findings": outlier_results,
-            "confidence": min(1.0, len(rows) / 500.0),
-            "data_quality": f"Stream {stream} analyzed for outliers. " +
-                           f"{outlier_results.get('total_outliers', 0)} outliers found out of {len(rows)} total records."
+    # Return bridge request instead of fetching data
+    return {
+        "type": "bridge_request_with_analysis",
+        "tool": "telemetry_slice",
+        "analysis_tool": "detect_statistical_outliers",
+        "params": {
+            "sessionId": session_id,
+            "stream": stream,
+            "fields": fields,
+            "max_points": 10000
+        },
+        "analysis_params": {
+            "fields": fields,
+            "threshold_sigma": threshold_sigma,
+            "window_size_ms": window_size_ms
         }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Outlier detection failed: {str(e)}",
-            "methodology": "Statistical analysis execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
+    }
+
 
 def trace_causal_chains_impl(session_id: str, target_timestamp_ms: int, time_window_ms: int = 30000) -> Dict[str, Any]:
-    """Find STATUSTEXT events that may be causally related to a target timestamp"""
+    """Find STATUSTEXT events that may be causally related to a target timestamp - returns bridge request"""
     if session_id not in sessions:
         return {
             "ok": False,
@@ -1210,63 +626,23 @@ def trace_causal_chains_impl(session_id: str, target_timestamp_ms: int, time_win
             "data_quality": "Session not found"
         }
     
-    session = sessions[session_id]
-    
-    try:
-        # Search for STATUSTEXT events within the time window
-        nearby_events = []
-        window_start = target_timestamp_ms - time_window_ms
-        window_end = target_timestamp_ms + time_window_ms
-        
-        # Look through session events for STATUSTEXT messages
-        for event in session.events:
-            if event.get("text"):  # Check if the event has text content
-                event_time = event.get("t", 0)  # Use "t" for timestamp
-                
-                # Check if event is within time window
-                if window_start <= event_time <= window_end:
-                    time_delta = event_time - target_timestamp_ms
-                    nearby_events.append({
-                        "timestamp_ms": event_time,
-                        "text": event.get("text", ""),
-                        "severity": event.get("severity", 0),
-                        "time_delta_ms": time_delta,
-                        "time_delta_seconds": round(time_delta / 1000, 1),
-                        "direction": "before" if time_delta < 0 else "after"
-                    })
-        
-        # Sort by proximity to target timestamp
-        nearby_events.sort(key=lambda x: abs(x["time_delta_ms"]))
-        
-        # Calculate proximity ranking
-        for i, event in enumerate(nearby_events):
-            event["proximity_rank"] = i + 1
-        
-        return {
-            "ok": True,
-            "methodology": f"Event correlation analysis for timestamp {target_timestamp_ms}. " +
-                          f"Searched for STATUSTEXT events within ±{time_window_ms}ms window. " +
-                          f"Found {len(nearby_events)} events, sorted by temporal proximity.",
-            "findings": {
-                "target_timestamp_ms": target_timestamp_ms,
-                "time_window_ms": time_window_ms,
-                "events_found": len(nearby_events),
-                "nearby_events": nearby_events
-            },
-            "confidence": min(1.0, len(nearby_events) / 10.0),  # Higher confidence with more events
-            "data_quality": f"Analyzed {len(session.events)} total events in session. " +
-                           f"Found {len(nearby_events)} STATUSTEXT events within ±{time_window_ms}ms of target."
+    # Return bridge request instead of fetching data
+    # For causal chains, we need events data, so we'll request a special "events" stream
+    return {
+        "type": "bridge_request_with_analysis",
+        "tool": "telemetry_slice",
+        "analysis_tool": "trace_causal_chains",
+        "params": {
+            "sessionId": session_id,
+            "stream": "events",  # Special stream for events data
+            "fields": ["text", "severity", "t"],  # Event fields we need
+            "max_points": 10000
+        },
+        "analysis_params": {
+            "target_timestamp_ms": target_timestamp_ms,
+            "time_window_ms": time_window_ms
         }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Event correlation failed: {str(e)}",
-            "methodology": "Event correlation execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
+    }
 
 # Register tool functions
 TOOL_FUNCTIONS["telemetry_index"] = telemetry_index
@@ -1303,11 +679,13 @@ def create_session_service(bundle: SessionBundle) -> SessionResponse:
     except Exception as e:
         raise RuntimeError(str(e))
 
+
 def get_session_service(session_id: str):
     if session_id not in sessions:
         raise ValueError("Session not found")
     
     return sessions[session_id]
+
 
 def delete_session_service(session_id: str) -> SessionResponse:
     if session_id not in sessions:
@@ -1321,8 +699,10 @@ def delete_session_service(session_id: str) -> SessionResponse:
         message="Session deleted"
     )
 
+
 def list_sessions_service() -> List[str]:
     return list(sessions.keys())
+
 
 # Chat and tool calling services
 def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
@@ -1352,8 +732,11 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
         
         while iteration < max_iterations:
             iteration += 1
+            if iteration > 1:  # Only log on resume iterations
+                print(f"[RESUME] continuing reasoning; prior_iter={iteration-1} messages={len(messages)}")
             
             # Call OpenAI with tools
+            print(f"[ITER {iteration}] -> calling OpenAI; messages={len(messages)}")
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -1364,6 +747,9 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
             )
             
             message = response.choices[0].message
+            print(f"[ITER {iteration}] <- assistant: has_tool_calls={bool(message.tool_calls)} "
+                  f"content_len={len(message.content or '') if hasattr(message,'content') else 0} "
+                  f"tools={[tc.function.name for tc in (message.tool_calls or [])]}")
             
             # Ensure every message has content field (required by OpenAI API)
             message_dict = {
@@ -1426,11 +812,23 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                     # Register all bridge calls in pending_calls
                     for tc in bridge_calls:
                         tool_args = json.loads(tc.function.arguments)
-                        pending_conversations[session_id]["pending_calls"][tc.id] = {
+                        call_data = {
                             "tool": tc.function.name,
                             "params": tool_args,
                             "result": None,
                         }
+                        
+                        # Check if this is an analysis tool that returns bridge_request_with_analysis
+                        if tc.function.name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
+                            # Execute the tool to get the bridge request with analysis metadata
+                            tool_result = TOOL_FUNCTIONS[tc.function.name](**tool_args)
+                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
+                                call_data["analysis_tool"] = tool_result["analysis_tool"]
+                                call_data["analysis_params"] = tool_result["analysis_params"]
+                                # Update params to use the bridge request params
+                                call_data["params"] = tool_result["params"]
+                        
+                        pending_conversations[session_id]["pending_calls"][tc.id] = call_data
 
                     # Return a single batch bridge request for the frontend
                     return ToolCallReply(
@@ -1457,7 +855,7 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                     
                     # Log tool call
                     tool_start = time.time()
-                    print(f"Tool call: {tool_name}({tool_args})")
+                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
                     
                     # Execute tool
                     try:
@@ -1473,6 +871,7 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                                 "tool": "telemetry_slice",
                                 "params": tool_args
                             }
+                            print(f"[ITER {iteration}] BRIDGE REQUEST: {tool_name} call_id={tool_call.id} args={tool_args}")
                         elif tool_name == "analyze_flight_baseline":
                             # Regular backend tool - execute directly
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
@@ -1521,11 +920,23 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                             pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = {
+                        call_data = {
                             "tool": tool_name,
                             "params": tool_args,
                             "result": None
                         }
+                        
+                        # Check if this is an analysis tool that returns bridge_request_with_analysis
+                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
+                            # Execute the tool to get the bridge request with analysis metadata
+                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
+                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
+                                call_data["analysis_tool"] = tool_result["analysis_tool"]
+                                call_data["analysis_params"] = tool_result["analysis_params"]
+                                # Update params to use the bridge request params
+                                call_data["params"] = tool_result["params"]
+                        
+                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
                         
                         # Check if this is the last tool call in this turn
                         remaining_tool_calls = [tc for tc in message.tool_calls if tc.id not in pending_conversations[session_id]["pending_calls"]]
@@ -1581,6 +992,8 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                 break
         
         total_duration = time.time() - start_time
+        print(f"[DONE] iterations={iteration} final_chars={len(reply)}")
+        print(f"[DONE] iterations={iteration} final_chars={len(reply)}")
         print(f"Chat completed in {total_duration:.3f}s after {iteration} iterations")
         
         return ToolCallReply(
@@ -1596,6 +1009,7 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
     except Exception as e:
         print(f"Error in chat_with_tools: {str(e)}")
         raise RuntimeError(str(e))    
+
 
 def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
     """Handle batch tool replies to prevent duplicate tool_call_id errors"""
@@ -1616,12 +1030,40 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
         
         conversation = pending_conversations[session_id]
         
-        # Store all results
+        # Store all results and process analysis if needed
         for result in results:
             call_id = result.get('callId')
             if call_id in conversation["pending_calls"]:
-                conversation["pending_calls"][call_id]["result"] = result.get('result')
-                print(f"Stored result for {call_id}")
+                call_data = conversation["pending_calls"][call_id]
+                bridge_result = result.get('result')
+                
+                # Check if this is a bridge request with analysis
+                if "analysis_tool" in call_data:
+                    analysis_tool = call_data["analysis_tool"]
+                    analysis_params = call_data["analysis_params"]
+                    telemetry_data = bridge_result
+                    
+                    print(f"[ANALYSIS] Processing {analysis_tool} for call_id={call_id}")
+                    
+                    # Run the appropriate pure analysis function
+                    if analysis_tool == "detect_statistical_outliers":
+                        analysis_result = analyze_statistical_outliers_pure(telemetry_data, **analysis_params)
+                    elif analysis_tool == "analyze_flight_baseline":
+                        analysis_result = analyze_baseline_pure(telemetry_data, **analysis_params)
+                    elif analysis_tool == "trace_causal_chains":
+                        analysis_result = trace_causal_chains_pure(telemetry_data, **analysis_params)
+                    else:
+                        print(f"WARNING: Unknown analysis tool: {analysis_tool}")
+                        analysis_result = bridge_result
+                    
+                    call_data["result"] = analysis_result
+                    print(f"[ANALYSIS] Completed {analysis_tool} for call_id={call_id}")
+                else:
+                    # Regular bridge result, no analysis needed
+                    call_data["result"] = bridge_result
+                
+                print(f"[BRIDGE] result received for call_id={call_id} ok={bridge_result.get('ok')} "
+                      f"count={bridge_result.get('count')} fields={bridge_result.get('fields')}")
             else:
                 print(f"WARNING: Call {call_id} not found in pending calls")
         
@@ -1692,6 +1134,8 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
         
         while iteration < max_iterations:
             iteration += 1
+            if iteration > 1:  # Only log on resume iterations
+                print(f"[RESUME] continuing reasoning; prior_iter={iteration-1} messages={len(messages)}")
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
@@ -1735,7 +1179,7 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                     
                     # Log tool call
                     tool_start = time.time()
-                    print(f"Tool call: {tool_name}({tool_args})")
+                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
                     
                     # Execute tool
                     try:
@@ -1799,11 +1243,23 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                             pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = {
+                        call_data = {
                             "tool": tool_name,
                             "params": tool_args,
                             "result": None
                         }
+                        
+                        # Check if this is an analysis tool that returns bridge_request_with_analysis
+                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
+                            # Execute the tool to get the bridge request with analysis metadata
+                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
+                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
+                                call_data["analysis_tool"] = tool_result["analysis_tool"]
+                                call_data["analysis_params"] = tool_result["analysis_params"]
+                                # Update params to use the bridge request params
+                                call_data["params"] = tool_result["params"]
+                        
+                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
                         
                         # Return bridge request response immediately
                         return ToolReplyResponse(
@@ -1845,6 +1301,7 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
         del pending_conversations[session_id]
         
         total_duration = time.time() - start_time
+        print(f"[DONE] iterations={iteration} final_chars={len(reply)}")
         print(f"Chat completed in {total_duration:.3f}s after {iteration} iterations")
         
         return ToolReplyResponse(
@@ -1860,6 +1317,7 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
         import traceback
         traceback.print_exc()
         raise RuntimeError(str(e))
+
 
 def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
     """Handle tool reply from frontend and resume agent conversation"""
@@ -1960,6 +1418,8 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
         
         while iteration < max_iterations:
             iteration += 1
+            if iteration > 1:  # Only log on resume iterations
+                print(f"[RESUME] continuing reasoning; prior_iter={iteration-1} messages={len(messages)}")
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
@@ -2003,7 +1463,7 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                     
                     # Log tool call
                     tool_start = time.time()
-                    print(f"Tool call: {tool_name}({tool_args})")
+                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
                     
                     # Execute tool
                     try:
@@ -2019,6 +1479,7 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                                 "tool": "telemetry_slice",
                                 "params": tool_args
                             }
+                            print(f"[ITER {iteration}] BRIDGE REQUEST: {tool_name} call_id={tool_call.id} args={tool_args}")
                         elif tool_name == "analyze_flight_baseline":
                             # Regular backend tool - execute directly
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
@@ -2067,11 +1528,23 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                             pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
                         
                         # Add this tool call to pending calls
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = {
+                        call_data = {
                             "tool": tool_name,
                             "params": tool_args,
                             "result": None
                         }
+                        
+                        # Check if this is an analysis tool that returns bridge_request_with_analysis
+                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
+                            # Execute the tool to get the bridge request with analysis metadata
+                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
+                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
+                                call_data["analysis_tool"] = tool_result["analysis_tool"]
+                                call_data["analysis_params"] = tool_result["analysis_params"]
+                                # Update params to use the bridge request params
+                                call_data["params"] = tool_result["params"]
+                        
+                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
                         
                         # Return bridge request response immediately
                         return ToolReplyResponse(
@@ -2110,6 +1583,7 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
         del pending_conversations[session_id]
         
         total_duration = time.time() - start_time
+        print(f"[DONE] iterations={iteration} final_chars={len(reply)}")
         print(f"Chat completed in {total_duration:.3f}s after {iteration} iterations")
         
         return ToolReplyResponse(

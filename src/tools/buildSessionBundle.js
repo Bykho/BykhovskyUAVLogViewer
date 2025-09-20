@@ -95,6 +95,9 @@ export function buildSessionBundle (store, fileName = 'unknown') {
     // Get messages from store
     const messages = store?.state?.messages || store?.messages || store?.state || store || {}
 
+    // Log raw data before bundle creation
+    console.log('=== RAW DATA BEFORE BUNDLE CREATION ===', messages)
+
     // Generate session ID
     const sessionId = makeSessionIdFromFile({ name: fileName })
 
@@ -157,6 +160,9 @@ export function buildSessionBundle (store, fileName = 'unknown') {
     if (bundleSize > 1000000) { // 1MB limit
         console.warn('Session bundle is large:', bundleSize, 'bytes')
     }
+
+    // Log final bundle output
+    console.log('=== FINAL BUNDLE OUTPUT ===', bundle)
 
     return bundle
 }
