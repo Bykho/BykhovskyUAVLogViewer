@@ -22,6 +22,7 @@ from prompts import (
     TOOL_DEFINITIONS,
     TOOL_SYSTEM_PROMPT
 )
+from escalate import escalate
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -37,27 +38,6 @@ TOOL_FUNCTIONS = {
     "detect_statistical_outliers": None,
     "trace_causal_chains": None,
 }
-
-
-def telemetry_index(session_id: str) -> Dict[str, Any]:
-    """Get stream inventory and metadata for a session"""
-    if session_id not in sessions:
-        return {
-            "ok": False,
-            "error": f"Session {session_id} not found",
-            "streams": {},
-            "meta": {}
-        }
-    
-    session = sessions[session_id]
-    return {
-        "ok": True,
-        "streams": session.index,
-        "meta": session.meta,
-        "event_count": len(session.events),
-        "downsample_available": list(session.downsample1Hz.keys())
-    }
-
 
 
 # Tool implementations
@@ -650,6 +630,7 @@ TOOL_FUNCTIONS["metrics_compute"] = metrics_compute
 TOOL_FUNCTIONS["analyze_flight_baseline"] = analyze_flight_baseline_impl
 TOOL_FUNCTIONS["detect_statistical_outliers"] = detect_statistical_outliers_impl
 TOOL_FUNCTIONS["trace_causal_chains"] = trace_causal_chains_impl
+TOOL_FUNCTIONS["escalate"] = escalate
 
 # Session management services
 def create_session_service(bundle: SessionBundle) -> SessionResponse:
@@ -714,11 +695,18 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
     try:
         # Clean up any existing pending conversation for this session
         # This prevents state corruption when starting a new conversation
+        # BUT preserve conversation if escalation feedback is pending
         if req.sessionId in pending_conversations:
-            print(f"Cleaning up existing pending conversation for session {req.sessionId}")
-            print(f"Pending calls before cleanup: {list(pending_conversations[req.sessionId]['pending_calls'].keys())}")
-            del pending_conversations[req.sessionId]
-            print(f"Successfully cleaned up session {req.sessionId}")
+            conversation = pending_conversations[req.sessionId]
+            escalation_feedback_pending = conversation.get("escalation_feedback_pending", False)
+            
+            if escalation_feedback_pending:
+                print(f"Preserving conversation for session {req.sessionId} - escalation feedback pending")
+            else:
+                print(f"Cleaning up existing pending conversation for session {req.sessionId}")
+                print(f"Pending calls before cleanup: {list(conversation['pending_calls'].keys())}")
+                del pending_conversations[req.sessionId]
+                print(f"Successfully cleaned up session {req.sessionId}")
         
         # Initialize messages with system prompt
         system_prompt = TOOL_SYSTEM_PROMPT + f"\n\nCurrent session ID: {req.sessionId}"
@@ -803,11 +791,16 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                             "iteration": iteration,
                             "start_time": start_time,
                             "tool_execution_log": tool_execution_log.copy(),
+                            "escalation_feedback_pending": False,
                         }
                     else:
+                        # Preserve escalation feedback pending flag when updating conversation state
+                        existing_escalation_flag = pending_conversations[session_id].get("escalation_feedback_pending", False)
+                        
                         pending_conversations[session_id]["messages"] = messages.copy()
                         pending_conversations[session_id]["iteration"] = iteration
                         pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
+                        pending_conversations[session_id]["escalation_feedback_pending"] = existing_escalation_flag
 
                     # Register all bridge calls in pending_calls
                     for tc in bridge_calls:
@@ -885,6 +878,12 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                             # Regular backend tool - execute directly
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
                                                                     tool_args.get("time_window_ms", 30000))
+                        elif tool_name == "escalate":
+                            # Regular backend tool - execute directly
+                            context = tool_args.get("context", {})
+                            print(f"[ITER {iteration}] ESCALATE: context={context}")
+                            result = TOOL_FUNCTIONS[tool_name](context)
+                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
                         else:
                             result = {"status": "not_implemented", "tool": tool_name}
                     except Exception as e:
@@ -963,7 +962,7 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                             # IMPORTANT: Skip adding tool message for bridge tools
                             continue
                     
-                    # Add tool result to messages
+                    # Add tool result to messages first (required for conversation consistency)
                     try:
                         content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                     except Exception as e:
@@ -976,6 +975,42 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                         "content": content
                     }
                     messages.append(tool_message)
+                    
+                    # Handle escalation results specially after adding tool message
+                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
+                        verdict = result.get("verdict")
+                        notes = result.get("notes", "")
+                        
+                        if verdict == "accept":
+                            # Escalation accepted - inject notes as feedback for LLM to incorporate
+                            print(f"[ESCALATION] ACCEPTED: {notes}")
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"Escalation validation: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            
+                        elif verdict == "reject":
+                            # Escalation rejected - store notes for final response and add feedback as system message
+                            print(f"[ESCALATION] REJECTED: {notes}")
+                            # Store escalation notes for later use in final response
+                            if not hasattr(chat_with_tools_service, '_escalation_notes'):
+                                chat_with_tools_service._escalation_notes = []
+                            chat_with_tools_service._escalation_notes.append(notes)
+
+                            # Set escalation feedback pending flag to prevent conversation cleanup
+                            if req.sessionId in pending_conversations:
+                                pending_conversations[req.sessionId]["escalation_feedback_pending"] = True
+
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            # Continue the loop to let LLM deliberate again
+                            continue
+                    
+                    # Skip the normal tool result addition since we already did it above
                     last_tool_result = result
             else:
                 # Model provided final answer
@@ -990,6 +1025,8 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
             if message["role"] == "assistant" and message.get("content"):
                 reply = message["content"]
                 break
+        
+        # Escalation notes are now handled by the LLM summarizing them in the response
         
         total_duration = time.time() - start_time
         print(f"[DONE] iterations={iteration} final_chars={len(reply)}")
@@ -1208,6 +1245,12 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                             # Regular backend tool - execute directly
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
                                                                     tool_args.get("time_window_ms", 30000))
+                        elif tool_name == "escalate":
+                            # Regular backend tool - execute directly
+                            context = tool_args.get("context", {})
+                            print(f"[ITER {iteration}] ESCALATE: context={context}")
+                            result = TOOL_FUNCTIONS[tool_name](context)
+                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
                         else:
                             result = {"status": "error", "tool": tool_name, "error": f"Unknown tool: {tool_name}"}
                     except Exception as e:
@@ -1267,7 +1310,7 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                             message=f"New bridge request: {tool_name}"
                         )
                     
-                    # Add tool result to messages
+                    # Add tool result to messages first (required for conversation consistency)
                     try:
                         content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                     except Exception as e:
@@ -1281,7 +1324,43 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                         "content": content
                     }
                     messages.append(tool_message)
-                    print(f"Added tool result to conversation")
+                    
+                    # Handle escalation results specially after adding tool message
+                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
+                        verdict = result.get("verdict")
+                        notes = result.get("notes", "")
+                        
+                        if verdict == "accept":
+                            # Escalation accepted - inject notes as feedback for LLM to incorporate
+                            print(f"[ESCALATION] ACCEPTED: {notes}")
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"Escalation validation: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            
+                        elif verdict == "reject":
+                            # Escalation rejected - store notes for final response and add feedback as system message
+                            print(f"[ESCALATION] REJECTED: {notes}")
+                            # Store escalation notes for later use in final response
+                            if not hasattr(tool_reply_batch_service, '_escalation_notes'):
+                                tool_reply_batch_service._escalation_notes = []
+                            tool_reply_batch_service._escalation_notes.append(notes)
+
+                            # Set escalation feedback pending flag to prevent conversation cleanup
+                            if session_id in pending_conversations:
+                                pending_conversations[session_id]["escalation_feedback_pending"] = True
+
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            # Continue the loop to let LLM deliberate again
+                            continue
+                    
+                    # Skip the normal tool result addition since we already did it above
+                    last_tool_result = result
             
             # If no tool calls, we have a final response
             if not message.tool_calls:
@@ -1294,8 +1373,14 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                 reply = message["content"]
                 break
         
+        # Escalation notes are now handled by the LLM summarizing them in the response
+        
         # Get the preserved tool execution log before cleanup
         preserved_log = conversation.get("tool_execution_log", [])
+        
+        # Clear escalation feedback pending flag since conversation is completing
+        if "escalation_feedback_pending" in conversation:
+            print(f"Clearing escalation feedback pending flag for session {session_id}")
         
         # Clean up the pending conversation
         del pending_conversations[session_id]
@@ -1493,6 +1578,12 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                             # Regular backend tool - execute directly
                             result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
                                                                     tool_args.get("time_window_ms", 30000))
+                        elif tool_name == "escalate":
+                            # Regular backend tool - execute directly
+                            context = tool_args.get("context", {})
+                            print(f"[ITER {iteration}] ESCALATE: context={context}")
+                            result = TOOL_FUNCTIONS[tool_name](context)
+                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
                         else:
                             result = {"status": "not_implemented", "tool": tool_name}
                     except Exception as e:
@@ -1552,7 +1643,7 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                             message=f"New bridge request: {tool_name}"
                         )
                     
-                    # Add tool result to messages
+                    # Add tool result to messages first (required for conversation consistency)
                     try:
                         content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                     except Exception as e:
@@ -1565,6 +1656,43 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                         "content": content
                     }
                     messages.append(tool_message)
+                    
+                    # Handle escalation results specially after adding tool message
+                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
+                        verdict = result.get("verdict")
+                        notes = result.get("notes", "")
+                        
+                        if verdict == "accept":
+                            # Escalation accepted - inject notes as feedback for LLM to incorporate
+                            print(f"[ESCALATION] ACCEPTED: {notes}")
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"Escalation validation: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            
+                        elif verdict == "reject":
+                            # Escalation rejected - store notes for final response and add feedback as system message
+                            print(f"[ESCALATION] REJECTED: {notes}")
+                            # Store escalation notes for later use in final response
+                            if not hasattr(tool_reply_service, '_escalation_notes'):
+                                tool_reply_service._escalation_notes = []
+                            tool_reply_service._escalation_notes.append(notes)
+
+                            # Set escalation feedback pending flag to prevent conversation cleanup
+                            if session_id in pending_conversations:
+                                pending_conversations[session_id]["escalation_feedback_pending"] = True
+
+                            system_feedback = {
+                                "role": "system",
+                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
+                            }
+                            messages.append(system_feedback)
+                            # Continue the loop to let LLM deliberate again
+                            continue
+                    
+                    # Skip the normal tool result addition since we already did it above
+                    last_tool_result = result
             else:
                 # Model provided final answer
                 break
@@ -1576,8 +1704,14 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                 reply = message["content"]
                 break
         
+        # Escalation notes are now handled by the LLM summarizing them in the response
+        
         # Get the preserved tool execution log before cleanup
         preserved_log = conversation.get("tool_execution_log", [])
+        
+        # Clear escalation feedback pending flag since conversation is completing
+        if "escalation_feedback_pending" in conversation:
+            print(f"Clearing escalation feedback pending flag for session {session_id}")
         
         # Clean up the pending conversation
         del pending_conversations[session_id]

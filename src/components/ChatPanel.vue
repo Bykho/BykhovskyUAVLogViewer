@@ -401,7 +401,7 @@ export default {
         },
         async executeTelemetrySlice (params) {
             const { stream, fields, start_ms: startMs, end_ms: endMs, max_points: maxPoints = 5000 } = params
-            const debugMode = true // Toggle for telemetry debugging
+            const debugMode = false // Toggle for telemetry debugging
 
             console.log('Executing telemetry slice:', params)
 

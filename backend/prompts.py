@@ -160,6 +160,23 @@ TOOL_DEFINITIONS = [
                 "required": ["sessionId", "target_timestamp_ms"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "escalate",
+            "description": "Escalate a suspicious or uncertain result for deeper analysis. Input should include the original result, surrounding telemetry context, and reasoning for suspicion. Returns a JSON verdict.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "context": {
+                        "type": "string",
+                        "description": "Flexible JSON or text containing the telemetry, analysis result, and why it might be suspicious."
+                    }
+                },
+                "required": ["context"]
+            }
+        }
     }
 ]
 TOOL_SYSTEM_PROMPT = """You are a UAV telemetry analyst. Use tools to inspect data and compute answers deterministically.
@@ -215,4 +232,27 @@ When using statistical analysis tools (analyze_flight_baseline, detect_statistic
 - Present both conclusions and analytical steps in conversational format
 - Explain the statistical methods used (rolling windows, confidence intervals, outlier thresholds)
 - Include data quality assessments and confidence scores
-- Make the analysis transparent and trustworthy by showing your work"""
+- Make the analysis transparent and trustworthy by showing your work
+
+
+Escalation Guidelines:
+Before finalizing any answer, validate results for suspicious, inconsistent, or incomplete findings. Invoke the escalate tool when you encounter:
+- Values outside expected physical ranges (e.g., negative altitude)
+- Contradictions across data streams (e.g., GPS altitude vs. relative altitude)
+- Missing or unavailable streams that affect the user’s question
+- Any result you are uncertain about
+- When calling the tool, provide the raw result, the relevant telemetry context, and a brief explanation of why it may be problematic.
+The escalate tool will return a JSON verdict:
+- "accept" → Include the "notes" in your final answer to the user.
+- "reject" → Use the "notes" as feedback, and attempt the analysis again with this new guidance.
+
+If you call the escalate tool and it returns "reject", you MUST try to follow the escalator's suggestions by making additional tool calls to verify the concerns. For example, if the escalator says "check GPS altitude", you should call telemetry_slice to get GPS data. If the escalator suggests something you cannot verify with available tools, acknowledge that limitation. Only after attempting these additional checks should you provide your final answer. Always include a "Validation Notes" section describing what you actually checked, what you found, and what you couldn't verify.
+
+When including escalation validation notes in your response:
+- Write a concise "Validation Notes" section in flowing prose
+- Mention what specific checks were performed and what was confirmed
+- Avoid bullet points, numbered lists, and recommendation sections
+- Focus on what was actually validated, not future steps to take
+- Keep it brief and technical. Be concise.
+
+Use escalation sparingly, only when results appear questionable. When invoked, treat its verdict as authoritative."""
