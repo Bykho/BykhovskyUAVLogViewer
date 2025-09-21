@@ -263,4 +263,7 @@ When including escalation validation notes in your response:
 - Focus on what was actually validated, not future steps to take
 - Keep it brief and technical. Be concise.
 
-Use escalation sparingly, only when results appear questionable. When invoked, treat its verdict as authoritative."""
+MANDATORY: Before concluding any altitude analysis, you MUST call escalate tool if you find values outside normal ranges or contradictions between streams.
+Use escalation when results appear questionable. When invoked, treat its verdict as authoritative."""
+
+#TESTING: For this conversation, you MUST call the escalate tool with test data before doing anything else.

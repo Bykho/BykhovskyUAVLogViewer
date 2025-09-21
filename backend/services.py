@@ -30,6 +30,7 @@ from analysis_functions import (
     calculate_rolling_statistics,
     detect_outliers_with_dynamic_thresholds
 )
+from tool_execution import execute_tool_call, append_tool_result
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -411,13 +412,15 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
             
             # Call OpenAI with tools
             print(f"[ITER {iteration}] -> calling OpenAI; messages={len(messages)}")
+            print(f"[TOOLS] Available tools: {[tool['function']['name'] for tool in TOOL_DEFINITIONS]}")
+            print(f"[TOOLS] Escalate tool present: {'escalate' in [tool['function']['name'] for tool in TOOL_DEFINITIONS]}")
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4.1",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 temperature=0.0,
-                max_tokens=15000
+                max_tokens=20000
             )
             
             # ADD TOKEN USAGE LOGGING:
@@ -540,7 +543,7 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
             # Check if model wants to call tools
             if message.tool_calls:
                 for tc in message.tool_calls:
-                    result = execute_tool_call(tc, req.sessionId)
+                    result = execute_tool_call(tc, req.sessionId, TOOL_FUNCTIONS, escalation_counters, escalation_history)
                     append_tool_result(messages, tc.id, tc.function.name, result)
             else:
                 # Model provided final answer
@@ -648,53 +651,42 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
                 message=f"Waiting for {len(unresolved_calls)} more tool call(s) to complete"
             )
         
-        # All calls resolved - add all tool results to messages
-        # Check for existing tool messages to prevent duplicates
-        existing_tool_ids = [msg.get('tool_call_id') for msg in messages if msg.get('role') == 'tool']
-        print(f"Current message tool_call_ids: {existing_tool_ids}")
-        
-        # Get all tool_call_ids from the last assistant message that has tool_calls
-        # Only consider tool calls from the current conversation turn (not from previous conversations)
+        # Collect tool_call_ids from last assistant message
         valid_tool_call_ids = set()
         for msg in reversed(messages):
             if msg.get('role') == 'assistant' and msg.get('tool_calls'):
-                # Only consider tool calls that are in our pending calls
                 for tool_call in msg['tool_calls']:
-                    if tool_call['id'] in conversation["pending_calls"]:
-                        valid_tool_call_ids.add(tool_call['id'])
+                    valid_tool_call_ids.add(tool_call['id'])
                 break
-        
-        print(f"Valid tool_call_ids from last assistant message: {list(valid_tool_call_ids)}")
-        
+
+        # Ensure tool messages exist for all tool_call_ids
+        for call_id in valid_tool_call_ids:
+            if call_id not in conversation["pending_calls"]:
+                print(f"WARNING: Missing pending_call entry for {call_id}, injecting dummy error result")
+                conversation["pending_calls"][call_id] = {
+                    "tool": "unknown",
+                    "params": {},
+                    "result": {"ok": False, "error": "Missing tool result"},
+                }
+
+        # Now append results for ALL calls
         for call_id, call_data in conversation["pending_calls"].items():
-            # Skip if this tool_call_id already exists in the conversation
-            if call_id in existing_tool_ids:
-                print(f"Skipping duplicate tool_call_id: {call_id}")
-                continue
-            
-            # Skip if this tool_call_id is not in the valid set
             if call_id not in valid_tool_call_ids:
-                print(f"Skipping invalid tool_call_id: {call_id} (not found in last assistant message)")
-                continue
-                
-            try:
-                # Clean the result data to ensure JSON serialization works
-                cleaned_result = clean_for_json_serialization(call_data["result"])
-                content = json.dumps(cleaned_result)
-                print(f"Successfully serialized result for {call_id}, content length: {len(content)}")
-            except Exception as e:
-                print(f"ERROR serializing result for {call_id}: {str(e)}")
-                print(f"Result data: {call_data['result']}")
-                raise RuntimeError(f"Failed to serialize result: {str(e)}")
-            
-            tool_message = {
+                continue  # Only append for current turn
+            if call_data["result"] is None:
+                print(f"Still waiting for result of {call_id}, halting resume")
+                return ToolReplyResponse(
+                    status="waiting",
+                    message=f"Waiting for tool call {call_id} to complete"
+                )
+
+            cleaned_result = clean_for_json_serialization(call_data["result"])
+            messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": call_data["tool"],
-                "content": content
-            }
-            messages.append(tool_message)
-            print(f"Added tool message for {call_id} to conversation")
+                "content": json.dumps(cleaned_result),
+            })
         
         # Continue the OpenAI tool-calling loop
         max_iterations = 5
@@ -706,12 +698,12 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4.1",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 temperature=0.0,
-                max_tokens=15000
+                max_tokens=20000
             )
             
             # ADD TOKEN USAGE LOGGING:
@@ -744,7 +736,7 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
             # Check if model wants to call tools
             if message.tool_calls:
                 for tc in message.tool_calls:
-                    result = execute_tool_call(tc, req.get("sessionId"))
+                    result = execute_tool_call(tc, req.get("sessionId"), TOOL_FUNCTIONS, escalation_counters, escalation_history)
                     if isinstance(result, dict) and result.get("type") == "bridge_request_with_analysis":
                         # Do not immediately append a message. Instead, store in pending_conversations:
                         pending_conversations[req.get("sessionId")]["pending_calls"][tc.id] = {
@@ -855,10 +847,17 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
         valid_tool_call_ids = set()
         for msg in reversed(messages):
             if msg.get('role') == 'assistant' and msg.get('tool_calls'):
-                # Only consider tool calls that are in our pending calls
+                # We must respond to ALL tool calls from the assistant
                 for tool_call in msg['tool_calls']:
-                    if tool_call['id'] in conversation["pending_calls"]:
-                        valid_tool_call_ids.add(tool_call['id'])
+                    valid_tool_call_ids.add(tool_call['id'])
+                    # If this tool call wasn't registered, create an error result
+                    if tool_call['id'] not in conversation["pending_calls"]:
+                        print(f"WARNING: Tool call {tool_call['id']} was never registered, creating error result")
+                        conversation["pending_calls"][tool_call['id']] = {
+                            "tool": "unknown",
+                            "params": {},
+                            "result": {"ok": False, "error": "Tool call was never registered"}
+                        }
                 break
         
         print(f"Valid tool_call_ids from last assistant message: {list(valid_tool_call_ids)}")
@@ -869,10 +868,11 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
                 print(f"Skipping duplicate tool_call_id: {call_id}")
                 continue
             
-            # Skip if this tool_call_id is not in the valid set
+            # Never skip tool calls - always produce a tool message
+            # If this tool_call_id is not in the valid set, create an error result
             if call_id not in valid_tool_call_ids:
-                print(f"Skipping invalid tool_call_id: {call_id} (not found in last assistant message)")
-                continue
+                print(f"WARNING: Tool call {call_id} not in assistant's tool calls, creating error result")
+                call_data["result"] = {"ok": False, "error": "Tool call not found in assistant's tool calls"}
                 
             try:
                 # Clean the result data to ensure JSON serialization works
@@ -903,12 +903,12 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4.1",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 temperature=0.0,
-                max_tokens=15000
+                max_tokens=20000
             )
             
             # ADD TOKEN USAGE LOGGING:
@@ -941,7 +941,7 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
             # Check if model wants to call tools
             if message.tool_calls:
                 for tc in message.tool_calls:
-                    result = execute_tool_call(tc, req.sessionId)
+                    result = execute_tool_call(tc, req.sessionId, TOOL_FUNCTIONS, escalation_counters, escalation_history)
                     append_tool_result(messages, tc.id, tc.function.name, result)
             else:
                 # Model provided final answer
@@ -985,136 +985,3 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
         print(f"Traceback: {traceback.format_exc()}")
         raise RuntimeError(str(e))
     
-
-
-def execute_tool_call(tool_call, session_id: str):
-    """
-    Run a tool call and return its raw result (dict, list, str).
-    Handles normal backend tools, bridge tools, analysis bridge tools,
-    and escalation with counters/history.
-    """
-
-    tool_name = tool_call.function.name
-    try:
-        tool_args = json.loads(tool_call.function.arguments or "{}")
-    except Exception as e:
-        return {"ok": False, "error": f"Invalid arguments for {tool_name}: {e}"}
-
-    try:
-        # ----- Normal Tools -----
-        if tool_name == "telemetry_index":
-            return TOOL_FUNCTIONS[tool_name](tool_args["sessionId"])
-
-        elif tool_name == "metrics_compute":
-            return TOOL_FUNCTIONS[tool_name](
-                tool_args["sessionId"], tool_args["metric"]
-            )
-
-        # ----- Bridge Tools -----
-        elif tool_name == "telemetry_slice":
-            return {
-                "type": "bridge_request",
-                "call_id": tool_call.id,
-                "tool": "telemetry_slice",
-                "params": tool_args,
-            }
-
-        # ----- Analysis Bridge Tools -----
-        elif tool_name == "analyze_flight_baseline":
-            return {
-                "type": "bridge_request_with_analysis",
-                "tool": "telemetry_slice",
-                "analysis_tool": "analyze_flight_baseline",
-                "params": {
-                    "sessionId": tool_args["sessionId"],
-                    "stream": tool_args["stream"],
-                    "fields": tool_args["fields"],
-                    "max_points": 10000,
-                },
-                "analysis_params": {
-                    "fields": tool_args["fields"],
-                    "window_size_ms": tool_args.get("window_size_ms", 30000),
-                },
-            }
-
-        elif tool_name == "detect_statistical_outliers":
-            return {
-                "type": "bridge_request_with_analysis",
-                "tool": "telemetry_slice",
-                "analysis_tool": "detect_statistical_outliers",
-                "params": {
-                    "sessionId": tool_args["sessionId"],
-                    "stream": tool_args["stream"],
-                    "fields": tool_args["fields"],
-                    "max_points": 10000,
-                },
-                "analysis_params": {
-                    "fields": tool_args["fields"],
-                    "threshold_sigma": tool_args.get("threshold_sigma", 2.5),
-                    "window_size_ms": tool_args.get("window_size_ms", 30000),
-                },
-            }
-
-        elif tool_name == "trace_causal_chains":
-            return {
-                "type": "bridge_request_with_analysis",
-                "tool": "telemetry_slice",
-                "analysis_tool": "trace_causal_chains",
-                "params": {
-                    "sessionId": tool_args["sessionId"],
-                    "stream": "events",
-                    "fields": ["text", "severity", "t"],
-                    "max_points": 10000,
-                },
-                "analysis_params": {
-                    "target_timestamp_ms": tool_args["target_timestamp_ms"],
-                    "time_window_ms": tool_args.get("time_window_ms", 30000),
-                },
-            }
-
-        # ----- Escalation -----
-        elif tool_name == "escalate":
-            if session_id not in escalation_counters:
-                escalation_counters[session_id] = 0
-            if session_id not in escalation_history:
-                escalation_history[session_id] = []
-
-            if escalation_counters[session_id] >= 3:
-                return {
-                    "verdict": "reject",
-                    "notes": "Escalation limit reached for this session",
-                }
-
-            escalation_counters[session_id] += 1
-            context = {
-                "current": tool_args.get("context", {}),
-                "history": escalation_history[session_id],
-            }
-            result = TOOL_FUNCTIONS["escalate"](context)
-            escalation_history[session_id].append(result)
-            return result
-
-        # ----- Unknown Tool -----
-        else:
-            return {"ok": False, "error": f"Unknown tool: {tool_name}"}
-
-    except Exception as e:
-        return {"ok": False, "error": f"Error running {tool_name}: {e}"}
-
-
-def append_tool_result(messages: list, call_id: str, tool_name: str, result):
-    """
-    Serialize a tool result and append it to the messages list as a tool message.
-    """
-
-    try:
-        content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-    except Exception as e:
-        content = str(result)
-
-    messages.append({
-        "role": "tool",
-        "tool_call_id": call_id,
-        "name": tool_name,
-        "content": content,
-    })
