@@ -23,12 +23,21 @@ from prompts import (
     TOOL_SYSTEM_PROMPT
 )
 from escalate import escalate
+from analysis_functions import (
+    analyze_statistical_outliers_pure,
+    analyze_baseline_pure,
+    trace_causal_chains_pure,
+    calculate_rolling_statistics,
+    detect_outliers_with_dynamic_thresholds
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 sessions: Dict[str, SessionBundle] = {}
 pending_conversations: Dict[str, Dict[str, Any]] = {}
+escalation_history: Dict[str, List[Dict[str, Any]]] = {}
+escalation_counters: Dict[str, int] = {}
 
 TOOL_FUNCTIONS = {
     "telemetry_index": None,
@@ -191,345 +200,6 @@ def get_telemetry_data_internal(session_id: str, stream: str, fields: List[str] 
         "stream": stream,
         "fields": fields or list(records[0].keys()) if records else []
     }
-
-
-def calculate_rolling_statistics(rows: List[Dict], fields: List[str], window_size_ms: int) -> Dict[str, Any]:
-    """Calculate rolling statistics for telemetry data"""
-    if not rows:
-        return {"windows": [], "duration_ms": 0}
-    
-    # Get time range
-    times = [row.get('time_boot_ms', row.get('TimeUS', row.get('_timestamp', 0))) for row in rows]
-    first_time = min(times)
-    last_time = max(times)
-    duration_ms = last_time - first_time
-    
-    # Calculate number of windows
-    num_windows = max(1, duration_ms // window_size_ms)
-    window_step = duration_ms / num_windows
-    
-    windows = []
-    for i in range(num_windows):
-        window_start = first_time + (i * window_step)
-        window_end = window_start + window_size_ms
-        
-        # Filter records for this window
-        window_records = [row for row in rows 
-                         if window_start <= row.get('time_boot_ms', row.get('TimeUS', row.get('_timestamp', 0))) <= window_end]
-        
-        window_data = {
-            "window_index": i,
-            "start_ms": window_start,
-            "end_ms": window_end,
-            "fields": {}
-        }
-        
-        # Calculate statistics for each field
-        for field in fields:
-            values = [row.get(field) for row in window_records 
-                     if row.get(field) is not None and isinstance(row.get(field), (int, float))]
-            
-            if len(values) < 2:
-                window_data["fields"][field] = {
-                    "field": field,
-                    "sample_count": len(values),
-                    "mean": None,
-                    "std": None,
-                    "min": None,
-                    "max": None
-                }
-                continue
-            
-            # Calculate basic statistics
-            mean = sum(values) / len(values)
-            variance = sum((x - mean) ** 2 for x in values) / len(values)
-            std = variance ** 0.5
-            
-            window_data["fields"][field] = {
-                "field": field,
-                "sample_count": len(values),
-                "mean": round(mean, 3),
-                "std": round(std, 3),
-                "min": min(values),
-                "max": max(values)
-            }
-        
-        windows.append(window_data)
-    
-    return {
-        "stream": rows[0].get('stream', 'unknown') if rows else 'unknown',
-        "fields": fields,
-        "window_size_ms": window_size_ms,
-        "total_records": len(rows),
-        "duration_ms": duration_ms,
-        "num_windows": num_windows,
-        "windows": windows
-    }
-
-
-# Pure analysis functions - operate on raw telemetry data without backend dependencies
-
-def analyze_statistical_outliers_pure(data: Dict, fields: List[str], threshold_sigma: float, window_size_ms: int) -> Dict[str, Any]:
-    """Analyze telemetry data for statistical outliers - pure function version"""
-    rows = data.get('rows', [])
-    stream = data.get('stream', 'unknown')
-    
-    if not rows:
-        return {
-            "ok": False,
-            "error": "No data provided",
-            "methodology": "Data validation",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": "No records in dataset"
-        }
-    
-    if len(rows) < 10:
-        return {
-            "ok": False,
-            "error": f"Insufficient data for analysis: {len(rows)} records",
-            "methodology": "Data sufficiency check",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Only {len(rows)} records available, need at least 10"
-        }
-    
-    try:
-        # Detect outliers using dynamic thresholds
-        outlier_results = detect_outliers_with_dynamic_thresholds(rows, fields, threshold_sigma, window_size_ms)
-        
-        return {
-            "ok": True,
-            "methodology": f"Dynamic threshold outlier detection using {threshold_sigma}σ thresholds. " +
-                          f"Analyzed {len(rows)} records in {window_size_ms}ms windows. " +
-                          f"Outliers identified as points exceeding {threshold_sigma} standard deviations from rolling mean.",
-            "findings": outlier_results,
-            "confidence": min(1.0, len(rows) / 500.0),
-            "data_quality": f"Stream {stream} analyzed for outliers. " +
-                           f"{outlier_results.get('total_outliers', 0)} outliers found out of {len(rows)} total records."
-        }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Outlier detection failed: {str(e)}",
-            "methodology": "Statistical analysis execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
-
-
-def analyze_baseline_pure(data: Dict, fields: List[str], window_size_ms: int) -> Dict[str, Any]:
-    """Analyze telemetry data for baselines - pure function version"""
-    rows = data.get('rows', [])
-    stream = data.get('stream', 'unknown')
-    
-    if not rows:
-        return {
-            "ok": False,
-            "error": "No data provided",
-            "methodology": "Data validation",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": "No records in dataset"
-        }
-    
-    if len(rows) < 10:
-        return {
-            "ok": False,
-            "error": f"Insufficient data for analysis: {len(rows)} records",
-            "methodology": "Data sufficiency check",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Only {len(rows)} records available, need at least 10"
-        }
-    
-    try:
-        # Calculate rolling statistics
-        baseline_results = calculate_rolling_statistics(rows, fields, window_size_ms)
-        
-        return {
-            "ok": True,
-            "methodology": f"Rolling window analysis with {window_size_ms}ms windows. " +
-                          f"Analyzed {len(rows)} records across {len(baseline_results['windows'])} windows. " +
-                          f"Calculated mean, std dev, and basic statistics for {len(fields)} fields.",
-            "findings": baseline_results,
-            "confidence": min(1.0, len(rows) / 1000.0),
-            "data_quality": f"Stream {stream} contains {len(rows)} records. " +
-                           f"Data density: {len(rows) / (baseline_results.get('duration_ms', 1) / 1000):.1f} Hz"
-        }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Analysis failed: {str(e)}",
-            "methodology": "Statistical analysis execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
-
-
-def trace_causal_chains_pure(data: Dict, target_timestamp_ms: int, time_window_ms: int = 30000) -> Dict[str, Any]:
-    """Find STATUSTEXT events that may be causally related to a target timestamp - pure function version"""
-    events = data.get('events', [])
-    stream = data.get('stream', 'unknown')
-    
-    if not events:
-        return {
-            "ok": False,
-            "error": "No events provided",
-            "methodology": "Data validation",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": "No events in dataset"
-        }
-    
-    try:
-        # Search for STATUSTEXT events within the time window
-        nearby_events = []
-        window_start = target_timestamp_ms - time_window_ms
-        window_end = target_timestamp_ms + time_window_ms
-        
-        # Look through events for STATUSTEXT messages
-        for event in events:
-            if event.get("text"):  # Check if the event has text content
-                event_time = event.get("t", 0)  # Use "t" for timestamp
-                
-                # Check if event is within time window
-                if window_start <= event_time <= window_end:
-                    time_delta = event_time - target_timestamp_ms
-                    nearby_events.append({
-                        "timestamp_ms": event_time,
-                        "text": event.get("text", ""),
-                        "severity": event.get("severity", 0),
-                        "time_delta_ms": time_delta,
-                        "time_delta_seconds": round(time_delta / 1000, 1),
-                        "direction": "before" if time_delta < 0 else "after"
-                    })
-        
-        # Sort by proximity to target timestamp
-        nearby_events.sort(key=lambda x: abs(x["time_delta_ms"]))
-        
-        # Calculate proximity ranking
-        for i, event in enumerate(nearby_events):
-            event["proximity_rank"] = i + 1
-        
-        return {
-            "ok": True,
-            "methodology": f"Event correlation analysis for timestamp {target_timestamp_ms}. " +
-                          f"Searched for STATUSTEXT events within ±{time_window_ms}ms window. " +
-                          f"Found {len(nearby_events)} events, sorted by temporal proximity.",
-            "findings": {
-                "target_timestamp_ms": target_timestamp_ms,
-                "time_window_ms": time_window_ms,
-                "events_found": len(nearby_events),
-                "nearby_events": nearby_events
-            },
-            "confidence": min(1.0, len(nearby_events) / 10.0),  # Higher confidence with more events
-            "data_quality": f"Analyzed {len(events)} total events in dataset. " +
-                           f"Found {len(nearby_events)} STATUSTEXT events within ±{time_window_ms}ms of target."
-        }
-        
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Event correlation failed: {str(e)}",
-            "methodology": "Event correlation execution",
-            "findings": {},
-            "confidence": 0.0,
-            "data_quality": f"Exception during analysis: {str(e)}"
-        }
-
-
-# Original helper functions (now used by pure functions)
-
-def detect_outliers_with_dynamic_thresholds(rows: List[Dict], fields: List[str], 
-                                          threshold_sigma: float, window_size_ms: int) -> Dict[str, Any]:
-    """Detect outliers using dynamic thresholds based on rolling statistics"""
-    if not rows:
-        return {"outliers": [], "total_outliers": 0}
-    
-    # Get time range
-    times = [row.get('time_boot_ms', row.get('TimeUS', row.get('_timestamp', 0))) for row in rows]
-    first_time = min(times)
-    last_time = max(times)
-    duration_ms = last_time - first_time
-    
-    # Calculate number of windows
-    num_windows = max(1, duration_ms // window_size_ms)
-    window_step = duration_ms / num_windows
-    
-    outliers = []
-    total_outliers = 0
-    
-    for i in range(num_windows):
-        window_start = first_time + (i * window_step)
-        window_end = window_start + window_size_ms
-        
-        # Filter records for this window
-        window_records = [row for row in rows 
-                         if window_start <= row.get('time_boot_ms', row.get('TimeUS', row.get('_timestamp', 0))) <= window_end]
-        
-        # For each field, detect outliers
-        for field in fields:
-            values = [row.get(field) for row in window_records 
-                     if row.get(field) is not None and isinstance(row.get(field), (int, float))]
-            
-            if len(values) < 3:
-                continue
-            
-            # Calculate baseline statistics
-            mean = sum(values) / len(values)
-            variance = sum((x - mean) ** 2 for x in values) / len(values)
-            std = variance ** 0.5
-            
-            # Calculate thresholds
-            threshold_upper = mean + (threshold_sigma * std)
-            threshold_lower = mean - (threshold_sigma * std)
-            
-            # Find outliers
-            outlier_points = []
-            for record in window_records:
-                value = record.get(field)
-                if value is not None and isinstance(value, (int, float)):
-                    if value > threshold_upper or value < threshold_lower:
-                        deviation = abs(value - mean) / std if std > 0 else 0
-                        outlier_points.append({
-                            "timestamp": record.get('time_boot_ms', record.get('TimeUS', record.get('_timestamp', 0))),
-                            "value": value,
-                            "deviation_sigma": round(deviation, 2),
-                            "deviation_magnitude": round(abs(value - mean), 3)
-                        })
-            
-            total_outliers += len(outlier_points)
-            
-            outliers.append({
-                "field": field,
-                "window_index": i,
-                "start_ms": window_start,
-                "end_ms": window_end,
-                "outlier_count": len(outlier_points),
-                "outlier_points": outlier_points,
-                "baseline_mean": round(mean, 3),
-                "baseline_std": round(std, 3),
-                "threshold_upper": round(threshold_upper, 3),
-                "threshold_lower": round(threshold_lower, 3)
-            })
-    
-    return {
-        "stream": rows[0].get('stream', 'unknown') if rows else 'unknown',
-        "fields": fields,
-        "threshold_sigma": threshold_sigma,
-        "window_size_ms": window_size_ms,
-        "total_records": len(rows),
-        "duration_ms": duration_ms,
-        "num_windows": num_windows,
-        "outliers": outliers,
-        "total_outliers": total_outliers
-    }
-
 
 # Statistical analysis functions that use telemetry_slice internally
 def analyze_flight_baseline_impl(session_id: str, stream: str, fields: List[str], window_size_ms: int = 30000) -> Dict[str, Any]:
@@ -707,9 +377,20 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
                 print(f"Pending calls before cleanup: {list(conversation['pending_calls'].keys())}")
                 del pending_conversations[req.sessionId]
                 print(f"Successfully cleaned up session {req.sessionId}")
+                # Reset escalation counter for new conversation
+                if req.sessionId in escalation_counters:
+                    del escalation_counters[req.sessionId]
+                    print(f"[ESCALATION] Reset counter for session {req.sessionId}")
+        else:
+            # New conversation - reset escalation counter
+            if req.sessionId in escalation_counters:
+                del escalation_counters[req.sessionId]
+                print(f"[ESCALATION] Reset counter for session {req.sessionId}")
         
         # Initialize messages with system prompt
         system_prompt = TOOL_SYSTEM_PROMPT + f"\n\nCurrent session ID: {req.sessionId}"
+        print(f"[SYSTEM PROMPT] Length: {len(system_prompt)} chars")
+        print(f"[SYSTEM PROMPT] Contains reasoning instruction: {'reasoning' in system_prompt.lower()}")
         messages = [
             {"role": "system", "content": system_prompt}
         ] + req.messages
@@ -720,21 +401,37 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
         
         while iteration < max_iterations:
             iteration += 1
+            
+            # ADD CONVERSATION STATE LOGGING:
+            print(f"[CONVERSATION STATE {iteration}] Messages: {len(messages)}")
+            print(f"[CONVERSATION STATE {iteration}] Last 2 message roles: {[m['role'] for m in messages[-2:]]}")
+            
             if iteration > 1:  # Only log on resume iterations
                 print(f"[RESUME] continuing reasoning; prior_iter={iteration-1} messages={len(messages)}")
             
             # Call OpenAI with tools
             print(f"[ITER {iteration}] -> calling OpenAI; messages={len(messages)}")
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1-mini",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
-                temperature=0.1,
-                max_tokens=1000
+                temperature=0.0,
+                max_tokens=15000
             )
             
+            # ADD TOKEN USAGE LOGGING:
+            print(f"[TOKENS] Used: {response.usage.total_tokens}, Completion: {response.usage.completion_tokens}")
+            
             message = response.choices[0].message
+            
+            # ADD LLM REASONING VISIBILITY:
+            print(f"[LLM REASONING {iteration}] Assistant content: {message.content}")
+            if message.tool_calls:
+                print(f"[LLM REASONING {iteration}] Tool decisions:")
+                for tc in message.tool_calls:
+                    print(f"  - {tc.function.name}: {tc.function.arguments}")
+            
             print(f"[ITER {iteration}] <- assistant: has_tool_calls={bool(message.tool_calls)} "
                   f"content_len={len(message.content or '') if hasattr(message,'content') else 0} "
                   f"tools={[tc.function.name for tc in (message.tool_calls or [])]}")
@@ -842,176 +539,9 @@ def chat_with_tools_service(req: ToolCallRequest) -> ToolCallReply:
 
             # Check if model wants to call tools
             if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    
-                    # Log tool call
-                    tool_start = time.time()
-                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
-                    
-                    # Execute tool
-                    try:
-                        if tool_name == "telemetry_index":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"])
-                        elif tool_name == "metrics_compute":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["metric"])
-                        elif tool_name == "telemetry_slice":
-                            # Bridge tool - return special response format
-                            result = {
-                                "type": "bridge_request",
-                                "call_id": tool_call.id,
-                                "tool": "telemetry_slice",
-                                "params": tool_args
-                            }
-                            print(f"[ITER {iteration}] BRIDGE REQUEST: {tool_name} call_id={tool_call.id} args={tool_args}")
-                        elif tool_name == "analyze_flight_baseline":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
-                                                               tool_args["fields"], tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "detect_statistical_outliers":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
-                                                                    tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
-                                                                    tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "trace_causal_chains":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
-                                                                    tool_args.get("time_window_ms", 30000))
-                        elif tool_name == "escalate":
-                            # Regular backend tool - execute directly
-                            context = tool_args.get("context", {})
-                            print(f"[ITER {iteration}] ESCALATE: context={context}")
-                            result = TOOL_FUNCTIONS[tool_name](context)
-                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
-                        else:
-                            result = {"status": "not_implemented", "tool": tool_name}
-                    except Exception as e:
-                        print(f"Error executing tool {tool_name}: {str(e)}")
-                        result = {"status": "error", "tool": tool_name, "error": str(e)}
-                    
-                    tool_duration = time.time() - tool_start
-                    print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
-                    
-                    # Log tool execution for frontend widget (only for non-bridge tools)
-                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
-                        tool_execution_log.append({
-                            "tool": tool_name,
-                            "duration": round(tool_duration, 3),
-                            "status": "completed"
-                        })
-                    
-                    # Handle bridge requests specially
-                    if isinstance(result, dict) and result.get("type") == "bridge_request":
-                        session_id = tool_args["sessionId"]
-                        
-                        # Initialize conversation tracking if not exists
-                        if session_id not in pending_conversations:
-                            pending_conversations[session_id] = {
-                                "messages": messages.copy(),
-                                "pending_calls": {},
-                                "iteration": iteration,
-                                "start_time": start_time,
-                                "tool_execution_log": tool_execution_log.copy()
-                            }
-                        else:
-                            # Preserve existing tool execution log
-                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
-                        
-                        # Add this tool call to pending calls
-                        call_data = {
-                            "tool": tool_name,
-                            "params": tool_args,
-                            "result": None
-                        }
-                        
-                        # Check if this is an analysis tool that returns bridge_request_with_analysis
-                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
-                            # Execute the tool to get the bridge request with analysis metadata
-                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
-                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
-                                call_data["analysis_tool"] = tool_result["analysis_tool"]
-                                call_data["analysis_params"] = tool_result["analysis_params"]
-                                # Update params to use the bridge request params
-                                call_data["params"] = tool_result["params"]
-                        
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
-                        
-                        # Check if this is the last tool call in this turn
-                        remaining_tool_calls = [tc for tc in message.tool_calls if tc.id not in pending_conversations[session_id]["pending_calls"]]
-                        
-                        if not remaining_tool_calls:
-                            # All tool calls are now pending - return batch bridge request
-                            return ToolCallReply(
-                                reply="",
-                                debug={
-                                    "type": "batch_bridge_request",
-                                    "session_id": session_id,
-                                    "calls": [
-                                        {
-                                            "call_id": call_id,
-                                            "tool": data["tool"],
-                                            "params": data["params"]
-                                        }
-                                        for call_id, data in pending_conversations[session_id]["pending_calls"].items()
-                                    ]
-                                }
-                            )
-                        else:
-                            # More tool calls coming - continue processing
-                            # IMPORTANT: Skip adding tool message for bridge tools
-                            continue
-                    
-                    # Add tool result to messages first (required for conversation consistency)
-                    try:
-                        content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-                    except Exception as e:
-                        content = f"Error serializing result: {str(e)}"
-                    
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": content
-                    }
-                    messages.append(tool_message)
-                    
-                    # Handle escalation results specially after adding tool message
-                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
-                        verdict = result.get("verdict")
-                        notes = result.get("notes", "")
-                        
-                        if verdict == "accept":
-                            # Escalation accepted - inject notes as feedback for LLM to incorporate
-                            print(f"[ESCALATION] ACCEPTED: {notes}")
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"Escalation validation: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            
-                        elif verdict == "reject":
-                            # Escalation rejected - store notes for final response and add feedback as system message
-                            print(f"[ESCALATION] REJECTED: {notes}")
-                            # Store escalation notes for later use in final response
-                            if not hasattr(chat_with_tools_service, '_escalation_notes'):
-                                chat_with_tools_service._escalation_notes = []
-                            chat_with_tools_service._escalation_notes.append(notes)
-
-                            # Set escalation feedback pending flag to prevent conversation cleanup
-                            if req.sessionId in pending_conversations:
-                                pending_conversations[req.sessionId]["escalation_feedback_pending"] = True
-
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            # Continue the loop to let LLM deliberate again
-                            continue
-                    
-                    # Skip the normal tool result addition since we already did it above
-                    last_tool_result = result
+                for tc in message.tool_calls:
+                    result = execute_tool_call(tc, req.sessionId)
+                    append_tool_result(messages, tc.id, tc.function.name, result)
             else:
                 # Model provided final answer
                 break
@@ -1176,13 +706,16 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1-mini",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
-                temperature=0.1,
-                max_tokens=1000
+                temperature=0.0,
+                max_tokens=15000
             )
+            
+            # ADD TOKEN USAGE LOGGING:
+            print(f"[TOKENS] Used: {response.usage.total_tokens}, Completion: {response.usage.completion_tokens}")
             
             message = response.choices[0].message
             
@@ -1210,157 +743,19 @@ def tool_reply_batch_service(req: dict) -> ToolReplyResponse:
             
             # Check if model wants to call tools
             if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    
-                    # Log tool call
-                    tool_start = time.time()
-                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
-                    
-                    # Execute tool
-                    try:
-                        if tool_name == "telemetry_index":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"])
-                        elif tool_name == "metrics_compute":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["metric"])
-                        elif tool_name == "telemetry_slice":
-                            # Bridge tool - return special response format
-                            result = {
-                                "type": "bridge_request",
-                                "call_id": tool_call.id,
-                                "tool": tool_name,
-                                "params": tool_args
-                            }
-                        elif tool_name == "analyze_flight_baseline":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
-                                                               tool_args["fields"], tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "detect_statistical_outliers":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
-                                                                    tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
-                                                                    tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "trace_causal_chains":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
-                                                                    tool_args.get("time_window_ms", 30000))
-                        elif tool_name == "escalate":
-                            # Regular backend tool - execute directly
-                            context = tool_args.get("context", {})
-                            print(f"[ITER {iteration}] ESCALATE: context={context}")
-                            result = TOOL_FUNCTIONS[tool_name](context)
-                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
-                        else:
-                            result = {"status": "error", "tool": tool_name, "error": f"Unknown tool: {tool_name}"}
-                    except Exception as e:
-                        print(f"Tool execution error: {str(e)}")
-                        result = {"status": "error", "tool": tool_name, "error": str(e)}
-                    
-                    tool_duration = time.time() - tool_start
-                    print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
-                    
-                    # Log tool execution for frontend widget (only for non-bridge tools)
-                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
-                        tool_execution_log.append({
-                            "tool": tool_name,
-                            "duration": round(tool_duration, 3),
-                            "status": "completed"
-                        })
-                    
-                    # Handle bridge requests specially
-                    if isinstance(result, dict) and result.get("type") == "bridge_request":
-                        session_id = tool_args["sessionId"]
-                        
-                        # Initialize conversation tracking if not exists
-                        if session_id not in pending_conversations:
-                            pending_conversations[session_id] = {
-                                "messages": messages.copy(),
-                                "pending_calls": {},
-                                "iteration": iteration,
-                                "start_time": start_time,
-                                "tool_execution_log": tool_execution_log.copy()
-                            }
-                        else:
-                            # Preserve existing tool execution log
-                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
-                        
-                        # Add this tool call to pending calls
-                        call_data = {
-                            "tool": tool_name,
-                            "params": tool_args,
-                            "result": None
+                for tc in message.tool_calls:
+                    result = execute_tool_call(tc, req.get("sessionId"))
+                    if isinstance(result, dict) and result.get("type") == "bridge_request_with_analysis":
+                        # Do not immediately append a message. Instead, store in pending_conversations:
+                        pending_conversations[req.get("sessionId")]["pending_calls"][tc.id] = {
+                            "tool": tc.function.name,
+                            "params": result["params"],
+                            "analysis_tool": result["analysis_tool"],
+                            "analysis_params": result["analysis_params"],
+                            "result": None,
                         }
-                        
-                        # Check if this is an analysis tool that returns bridge_request_with_analysis
-                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
-                            # Execute the tool to get the bridge request with analysis metadata
-                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
-                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
-                                call_data["analysis_tool"] = tool_result["analysis_tool"]
-                                call_data["analysis_params"] = tool_result["analysis_params"]
-                                # Update params to use the bridge request params
-                                call_data["params"] = tool_result["params"]
-                        
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
-                        
-                        # Return bridge request response immediately
-                        return ToolReplyResponse(
-                            status="bridge_request",
-                            message=f"New bridge request: {tool_name}"
-                        )
-                    
-                    # Add tool result to messages first (required for conversation consistency)
-                    try:
-                        content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-                    except Exception as e:
-                        print(f"Error serializing tool result: {str(e)}")
-                        content = str(result)
-                    
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": content
-                    }
-                    messages.append(tool_message)
-                    
-                    # Handle escalation results specially after adding tool message
-                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
-                        verdict = result.get("verdict")
-                        notes = result.get("notes", "")
-                        
-                        if verdict == "accept":
-                            # Escalation accepted - inject notes as feedback for LLM to incorporate
-                            print(f"[ESCALATION] ACCEPTED: {notes}")
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"Escalation validation: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            
-                        elif verdict == "reject":
-                            # Escalation rejected - store notes for final response and add feedback as system message
-                            print(f"[ESCALATION] REJECTED: {notes}")
-                            # Store escalation notes for later use in final response
-                            if not hasattr(tool_reply_batch_service, '_escalation_notes'):
-                                tool_reply_batch_service._escalation_notes = []
-                            tool_reply_batch_service._escalation_notes.append(notes)
-
-                            # Set escalation feedback pending flag to prevent conversation cleanup
-                            if session_id in pending_conversations:
-                                pending_conversations[session_id]["escalation_feedback_pending"] = True
-
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            # Continue the loop to let LLM deliberate again
-                            continue
-                    
-                    # Skip the normal tool result addition since we already did it above
-                    last_tool_result = result
+                    else:
+                        append_tool_result(messages, tc.id, tc.function.name, result)
             
             # If no tool calls, we have a final response
             if not message.tool_calls:
@@ -1508,13 +903,16 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
             
             # Call OpenAI with tools
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1-mini",
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
-                temperature=0.1,
-                max_tokens=1000
+                temperature=0.0,
+                max_tokens=15000
             )
+            
+            # ADD TOKEN USAGE LOGGING:
+            print(f"[TOKENS] Used: {response.usage.total_tokens}, Completion: {response.usage.completion_tokens}")
             
             message = response.choices[0].message
             
@@ -1542,157 +940,9 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
             
             # Check if model wants to call tools
             if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    
-                    # Log tool call
-                    tool_start = time.time()
-                    print(f"[ITER {iteration}] TOOL DECISION: {tool_name} args={tool_args}")
-                    
-                    # Execute tool
-                    try:
-                        if tool_name == "telemetry_index":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"])
-                        elif tool_name == "metrics_compute":
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["metric"])
-                        elif tool_name == "telemetry_slice":
-                            # Bridge tool - return special response format
-                            result = {
-                                "type": "bridge_request",
-                                "call_id": tool_call.id,
-                                "tool": "telemetry_slice",
-                                "params": tool_args
-                            }
-                            print(f"[ITER {iteration}] BRIDGE REQUEST: {tool_name} call_id={tool_call.id} args={tool_args}")
-                        elif tool_name == "analyze_flight_baseline":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"], 
-                                                               tool_args["fields"], tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "detect_statistical_outliers":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["stream"],
-                                                                    tool_args["fields"], tool_args.get("threshold_sigma", 2.5),
-                                                                    tool_args.get("window_size_ms", 30000))
-                        elif tool_name == "trace_causal_chains":
-                            # Regular backend tool - execute directly
-                            result = TOOL_FUNCTIONS[tool_name](tool_args["sessionId"], tool_args["target_timestamp_ms"],
-                                                                    tool_args.get("time_window_ms", 30000))
-                        elif tool_name == "escalate":
-                            # Regular backend tool - execute directly
-                            context = tool_args.get("context", {})
-                            print(f"[ITER {iteration}] ESCALATE: context={context}")
-                            result = TOOL_FUNCTIONS[tool_name](context)
-                            print(f"[ITER {iteration}] ESCALATE RESULT: {result}")
-                        else:
-                            result = {"status": "not_implemented", "tool": tool_name}
-                    except Exception as e:
-                        print(f"Error executing tool {tool_name}: {str(e)}")
-                        result = {"status": "error", "tool": tool_name, "error": str(e)}
-                    
-                    tool_duration = time.time() - tool_start
-                    print(f"Tool {tool_name} completed in {tool_duration:.3f}s")
-                    
-                    # Log tool execution for frontend widget (only for non-bridge tools)
-                    if not (isinstance(result, dict) and result.get("type") == "bridge_request"):
-                        tool_execution_log.append({
-                            "tool": tool_name,
-                            "duration": round(tool_duration, 3),
-                            "status": "completed"
-                        })
-                    
-                    # Handle bridge requests specially
-                    if isinstance(result, dict) and result.get("type") == "bridge_request":
-                        session_id = tool_args["sessionId"]
-                        
-                        # Initialize conversation tracking if not exists
-                        if session_id not in pending_conversations:
-                            pending_conversations[session_id] = {
-                                "messages": messages.copy(),
-                                "pending_calls": {},
-                                "iteration": iteration,
-                                "start_time": start_time,
-                                "tool_execution_log": tool_execution_log.copy()
-                            }
-                        else:
-                            # Preserve existing tool execution log
-                            pending_conversations[session_id]["tool_execution_log"].extend(tool_execution_log)
-                        
-                        # Add this tool call to pending calls
-                        call_data = {
-                            "tool": tool_name,
-                            "params": tool_args,
-                            "result": None
-                        }
-                        
-                        # Check if this is an analysis tool that returns bridge_request_with_analysis
-                        if tool_name in ["analyze_flight_baseline", "detect_statistical_outliers", "trace_causal_chains"]:
-                            # Execute the tool to get the bridge request with analysis metadata
-                            tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
-                            if isinstance(tool_result, dict) and tool_result.get("type") == "bridge_request_with_analysis":
-                                call_data["analysis_tool"] = tool_result["analysis_tool"]
-                                call_data["analysis_params"] = tool_result["analysis_params"]
-                                # Update params to use the bridge request params
-                                call_data["params"] = tool_result["params"]
-                        
-                        pending_conversations[session_id]["pending_calls"][tool_call.id] = call_data
-                        
-                        # Return bridge request response immediately
-                        return ToolReplyResponse(
-                            status="bridge_request",
-                            message=f"New bridge request: {tool_name}"
-                        )
-                    
-                    # Add tool result to messages first (required for conversation consistency)
-                    try:
-                        content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-                    except Exception as e:
-                        content = f"Error serializing result: {str(e)}"
-                    
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": content
-                    }
-                    messages.append(tool_message)
-                    
-                    # Handle escalation results specially after adding tool message
-                    if tool_name == "escalate" and isinstance(result, dict) and "verdict" in result:
-                        verdict = result.get("verdict")
-                        notes = result.get("notes", "")
-                        
-                        if verdict == "accept":
-                            # Escalation accepted - inject notes as feedback for LLM to incorporate
-                            print(f"[ESCALATION] ACCEPTED: {notes}")
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"Escalation validation: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            
-                        elif verdict == "reject":
-                            # Escalation rejected - store notes for final response and add feedback as system message
-                            print(f"[ESCALATION] REJECTED: {notes}")
-                            # Store escalation notes for later use in final response
-                            if not hasattr(tool_reply_service, '_escalation_notes'):
-                                tool_reply_service._escalation_notes = []
-                            tool_reply_service._escalation_notes.append(notes)
-
-                            # Set escalation feedback pending flag to prevent conversation cleanup
-                            if session_id in pending_conversations:
-                                pending_conversations[session_id]["escalation_feedback_pending"] = True
-
-                            system_feedback = {
-                                "role": "system",
-                                "content": f"IMPORTANT: Your previous conclusion was rejected by the validation system. You MUST revise your analysis based on this feedback and provide a corrected response that addresses these concerns: {notes}"
-                            }
-                            messages.append(system_feedback)
-                            # Continue the loop to let LLM deliberate again
-                            continue
-                    
-                    # Skip the normal tool result addition since we already did it above
-                    last_tool_result = result
+                for tc in message.tool_calls:
+                    result = execute_tool_call(tc, req.sessionId)
+                    append_tool_result(messages, tc.id, tc.function.name, result)
             else:
                 # Model provided final answer
                 break
@@ -1734,3 +984,137 @@ def tool_reply_service(req: ToolReplyRequest) -> ToolReplyResponse:
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         raise RuntimeError(str(e))
+    
+
+
+def execute_tool_call(tool_call, session_id: str):
+    """
+    Run a tool call and return its raw result (dict, list, str).
+    Handles normal backend tools, bridge tools, analysis bridge tools,
+    and escalation with counters/history.
+    """
+
+    tool_name = tool_call.function.name
+    try:
+        tool_args = json.loads(tool_call.function.arguments or "{}")
+    except Exception as e:
+        return {"ok": False, "error": f"Invalid arguments for {tool_name}: {e}"}
+
+    try:
+        # ----- Normal Tools -----
+        if tool_name == "telemetry_index":
+            return TOOL_FUNCTIONS[tool_name](tool_args["sessionId"])
+
+        elif tool_name == "metrics_compute":
+            return TOOL_FUNCTIONS[tool_name](
+                tool_args["sessionId"], tool_args["metric"]
+            )
+
+        # ----- Bridge Tools -----
+        elif tool_name == "telemetry_slice":
+            return {
+                "type": "bridge_request",
+                "call_id": tool_call.id,
+                "tool": "telemetry_slice",
+                "params": tool_args,
+            }
+
+        # ----- Analysis Bridge Tools -----
+        elif tool_name == "analyze_flight_baseline":
+            return {
+                "type": "bridge_request_with_analysis",
+                "tool": "telemetry_slice",
+                "analysis_tool": "analyze_flight_baseline",
+                "params": {
+                    "sessionId": tool_args["sessionId"],
+                    "stream": tool_args["stream"],
+                    "fields": tool_args["fields"],
+                    "max_points": 10000,
+                },
+                "analysis_params": {
+                    "fields": tool_args["fields"],
+                    "window_size_ms": tool_args.get("window_size_ms", 30000),
+                },
+            }
+
+        elif tool_name == "detect_statistical_outliers":
+            return {
+                "type": "bridge_request_with_analysis",
+                "tool": "telemetry_slice",
+                "analysis_tool": "detect_statistical_outliers",
+                "params": {
+                    "sessionId": tool_args["sessionId"],
+                    "stream": tool_args["stream"],
+                    "fields": tool_args["fields"],
+                    "max_points": 10000,
+                },
+                "analysis_params": {
+                    "fields": tool_args["fields"],
+                    "threshold_sigma": tool_args.get("threshold_sigma", 2.5),
+                    "window_size_ms": tool_args.get("window_size_ms", 30000),
+                },
+            }
+
+        elif tool_name == "trace_causal_chains":
+            return {
+                "type": "bridge_request_with_analysis",
+                "tool": "telemetry_slice",
+                "analysis_tool": "trace_causal_chains",
+                "params": {
+                    "sessionId": tool_args["sessionId"],
+                    "stream": "events",
+                    "fields": ["text", "severity", "t"],
+                    "max_points": 10000,
+                },
+                "analysis_params": {
+                    "target_timestamp_ms": tool_args["target_timestamp_ms"],
+                    "time_window_ms": tool_args.get("time_window_ms", 30000),
+                },
+            }
+
+        # ----- Escalation -----
+        elif tool_name == "escalate":
+            if session_id not in escalation_counters:
+                escalation_counters[session_id] = 0
+            if session_id not in escalation_history:
+                escalation_history[session_id] = []
+
+            if escalation_counters[session_id] >= 3:
+                return {
+                    "verdict": "reject",
+                    "notes": "Escalation limit reached for this session",
+                }
+
+            escalation_counters[session_id] += 1
+            context = {
+                "current": tool_args.get("context", {}),
+                "history": escalation_history[session_id],
+            }
+            result = TOOL_FUNCTIONS["escalate"](context)
+            escalation_history[session_id].append(result)
+            return result
+
+        # ----- Unknown Tool -----
+        else:
+            return {"ok": False, "error": f"Unknown tool: {tool_name}"}
+
+    except Exception as e:
+        return {"ok": False, "error": f"Error running {tool_name}: {e}"}
+
+
+def append_tool_result(messages: list, call_id: str, tool_name: str, result):
+    """
+    Serialize a tool result and append it to the messages list as a tool message.
+    """
+
+    try:
+        content = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+    except Exception as e:
+        content = str(result)
+
+    messages.append({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "name": tool_name,
+        "content": content,
+    })

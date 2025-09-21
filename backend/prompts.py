@@ -181,6 +181,11 @@ TOOL_DEFINITIONS = [
 ]
 TOOL_SYSTEM_PROMPT = """You are a UAV telemetry analyst. Use tools to inspect data and compute answers deterministically.
 
+CRITICAL: Before making ANY tool calls, you must FIRST provide detailed reasoning about your approach. Explain what you plan to do and why. After receiving tool results, analyze and synthesize the findings before proceeding.
+
+When escalation feedback is provided, explicitly acknowledge it and explain how you will modify your analysis approach accordingly.
+
+
 Guidelines:
 - Use metrics_compute for summary stats like altitude, flight time, GPS loss
 - Use telemetry_index to discover what data is available
@@ -205,6 +210,9 @@ When users ask broad investigative questions, follow these structured patterns:
 - Focus on data gaps first - they are often the most significant anomalies in flight data
 - When listing altitude values over a window, follow the Retrieval rules above and state which source was used ("relative_alt" or "VFR_HUD.alt"). Do not mix sources within one answer unless the user explicitly requests a comparison.
 - When a user asks about turns, you can use the attitude data from the UAV to investigate orientation, which could imply turning.
+
+Before making tool calls, always explain your reasoning and approach. After receiving tool results, analyze and synthesize the findings.
+When escalation feedback is provided, explicitly acknowledge it and modify your analysis approach accordingly.
 
 Correlation Analysis Guidelines:
 - For velocity/event correlation questions → Use detect_statistical_outliers on velocity fields to find significant changes, then use trace_causal_chains around those outlier timestamps to correlate with events
