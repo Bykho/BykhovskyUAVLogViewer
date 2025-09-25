@@ -2,11 +2,24 @@ import logging
 from typing import Any, Dict
 from models.data_Ag import DataAgentResponse
 from services import db
+from openai import OpenAI
+from dotenv import load_dotenv
+from e2b import Sandbox
+import os
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Initialize OpenAI client
+client = OpenAI()
+
 def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
-    
+    """
+    Self-healing Data Agent with LLM-driven retry loop.
+    Attempts to generate and execute code, with LLM-guided repair on failures.
+    """
     # Get schema bundle and DB connection "baked in" automatically
     schema_bundle = get_schema_bundle()
     db_connection = db.get_connection()
@@ -14,29 +27,251 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
     # Log all inputs clearly for debugging
     logger.info("=== DATA AGENT INPUTS ===")
     logger.info(f"Task Spec: {task_spec}")
-    logger.info(f"Schema Bundle Keys: {list(schema_bundle.keys()) if schema_bundle else 'None'}")
-    logger.info(f"DB Connection Type: {type(db_connection).__name__}")
+    #logger.info(f"Schema Bundle Keys: {list(schema_bundle.keys()) if schema_bundle else 'None'}")
+    #logger.info(f"DB Connection Type: {type(db_connection).__name__}")
     logger.info(f"Intent: {intent}")
     logger.info("=========================")
     
-    # Return placeholder response
+    # Self-healing retry loop
+    attempts = []
+    max_retries = 3
+    
+    for attempt_num in range(1, max_retries + 1):
+        logger.info(f"=== ATTEMPT {attempt_num}/{max_retries} ===")
+        
+        try:
+            # Generate code using LLM
+            if attempt_num == 1:
+                # First attempt: normal code generation
+                logger.info("=== CALLING LLM FOR INITIAL CODE GENERATION ===")
+                prompt = build_initial_prompt(schema_bundle, task_spec, intent)
+            else:
+                # Repair attempt: ask LLM to fix code based on previous error
+                logger.info("=== CALLING LLM FOR CODE REPAIR ===")
+                last_attempt = attempts[-1]
+                prompt = build_repair_prompt(
+                    schema_bundle, task_spec, intent,
+                    last_attempt["generated_code"], last_attempt["error"],
+                    last_attempt["stdout"], last_attempt["stderr"]
+                )
+            
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": "You generate executable code for UAV telemetry analysis. You are a code generator. Always return runnable Python code only. No explanations, no formatting, no extra text."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=2000
+            )
+            
+            generated_code = response.choices[0].message.content.strip()
+            logger.info(f"Generated code (attempt {attempt_num}): {generated_code[:200]}...")
+            
+            # Execute the generated code in E2B sandbox
+            success, result_data, stdout, stderr, error_msg = execute_in_sandbox(generated_code)
+            
+            # Save attempt record
+            attempt_record = {
+                "attempt": attempt_num,
+                "generated_code": generated_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "error": error_msg,
+                "success": success
+            }
+            attempts.append(attempt_record)
+            
+            if success:
+                # Success! Return with attempt history for transparency
+                logger.info(f"=== SUCCESS ON ATTEMPT {attempt_num} ===")
+                return DataAgentResponse(
+                    ok=True,
+                    data=result_data,
+                    executed_code=generated_code,
+                    errors=[],
+                    logs=[f"Attempt {a['attempt']}: {'Success' if a['success'] else a['error']}" for a in attempts],
+                    attempts=attempts
+                )
+            else:
+                logger.warning(f"=== ATTEMPT {attempt_num} FAILED: {error_msg} ===")
+                if attempt_num < max_retries:
+                    logger.info(f"=== RETRYING WITH LLM REPAIR (attempt {attempt_num + 1}) ===")
+                else:
+                    logger.error("=== ALL RETRIES EXHAUSTED ===")
+        
+        except Exception as e:
+            logger.error(f"LLM code generation failed on attempt {attempt_num}: {e}")
+            attempt_record = {
+                "attempt": attempt_num,
+                "generated_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": f"LLM generation failed: {str(e)}",
+                "success": False
+            }
+            attempts.append(attempt_record)
+    
+    # All attempts failed - return structured failure with history
+    logger.error("=== ALL RETRIES EXHAUSTED - RETURNING FAILURE ===")
     return DataAgentResponse(
-        ok=True,
+        ok=False,
         data=None,
-        executed_code=None,
-        errors=[],
-        logs=["Inputs received and logged."]
+        executed_code=attempts[-1]["generated_code"] if attempts else None,
+        errors=[a["error"] for a in attempts if a["error"]],
+        logs=["All retries failed"] + [f"Attempt {a['attempt']}: {a['error']}" for a in attempts],
+        attempts=attempts
     )
+
+def build_initial_prompt(schema_bundle: dict, task_spec: dict, intent: str) -> str:
+    """Build the initial prompt for code generation"""
+    return f"""
+You are a specialized coding agent for UAV telemetry analysis. 
+Your sole job is to write clean, runnable Python code that uses DuckDB 
+to query and analyze telemetry data.
+
+Context:
+- The schema bundle describes the available tables, columns, and datatypes.
+- The task spec defines what the user is asking for.
+- The intent explains the high-level purpose of the task.
+
+Rules:
+1. Always output valid Python code (no explanations, no Markdown, no prose).
+2. Use `duckdb` Python API (via a connection object passed in as `db_connection`).
+3. Use pandas if a DataFrame makes sense (e.g., for returning tabular results).
+4. Include clear variable names (e.g., `query`, `df`, `result`).
+5. The final line of code should assign the result to a variable called `result`.
+6. Do not print or log inside the generated code.
+
+Inputs:
+- Schema bundle: {schema_bundle}
+- Task spec: {task_spec}
+- Intent: {intent}
+
+Now generate only the Python code that fulfills the task.
+"""
+
+
+def build_repair_prompt(schema_bundle: dict, task_spec: dict, intent: str, 
+                       failed_code: str, error_msg: str, stdout: str, stderr: str) -> str:
+    """Build the repair prompt for fixing failed code"""
+    return f"""
+You previously wrote this code for UAV telemetry analysis:
+
+```python
+{failed_code}
+```
+
+It failed with this error from DuckDB:
+{error_msg}
+
+Additional context:
+- stdout: {stdout}
+- stderr: {stderr}
+
+Schema bundle:
+{schema_bundle}
+
+Original task spec: {task_spec}
+Original intent: {intent}
+
+Please revise the code so it will run successfully in DuckDB while preserving the intent.
+Only output corrected Python code (no explanations, no Markdown, no extra text).
+"""
+
+
+def execute_in_sandbox(generated_code: str) -> tuple[bool, Any, str, str, str]:
+    """
+    Execute generated code in E2B sandbox and return success status and outputs.
+    Returns: (success, result_data, stdout, stderr, error_msg)
+    """
+    try:
+        logger.info("=== EXECUTING CODE IN E2B SANDBOX ===")
+        
+        # Prepare the code with database connection setup
+        full_code = f"""
+import duckdb
+import pandas as pd
+
+# Database connection (simulated - in real E2B we'd need to pass the DB file)
+# For now, we'll create a mock connection for testing
+db_connection = duckdb.connect(":memory:")
+
+# User's generated code:
+{generated_code}
+"""
+        
+        with Sandbox.create(template="base", api_key=os.getenv("E2B_API_KEY")) as sandbox:
+            # Upload the database file to the sandbox
+            sandbox.files.write("/tmp/telemetry.duckdb", open("telemetry.duckdb", "rb").read())
+            
+            # Update the code to use the uploaded database
+            full_code = full_code.replace('duckdb.connect(":memory:")', 'duckdb.connect("/tmp/telemetry.duckdb")')
+            
+            # Add print(result) to capture the final output
+            full_code_with_print = full_code + "\nprint('=== RESULT ===')\nprint(result)"
+            
+            # Write the code to a file and run it
+            sandbox.files.write("/tmp/analysis.py", full_code_with_print)
+            
+            # Install required packages
+            install_process = sandbox.commands.run("pip install duckdb pandas")
+            if install_process.exit_code != 0:
+                logger.error(f"Package installation failed: {install_process.stderr}")
+            
+            process = sandbox.commands.run("python3 /tmp/analysis.py")
+            
+            # Capture outputs
+            stdout = process.stdout
+            stderr = process.stderr
+            
+            logger.info(f"E2B stdout: {stdout}")
+            if stderr:
+                logger.error(f"E2B stderr: {stderr}")
+            
+            # Check if execution was successful
+            if process.exit_code == 0:
+                # Extract the result from stdout
+                result_data = None
+                if stdout and "=== RESULT ===" in stdout:
+                    # Extract everything after the result marker
+                    result_section = stdout.split("=== RESULT ===")[1].strip()
+                    result_data = result_section
+                elif stdout:
+                    # Fallback: use the entire stdout if no result marker
+                    result_data = stdout
+                
+                return True, result_data, stdout, stderr, ""
+            else:
+                # Execution failed - preserve full error details for LLM repair
+                error_msg = stderr if stderr else f"Command exited with code {process.exit_code}"
+                return False, None, stdout, stderr, error_msg
+                
+    except Exception as e:
+        logger.error(f"E2B execution failed: {e}")
+        return False, None, "", "", f"E2B execution failed: {str(e)}"
+
 
 def get_schema_bundle() -> dict:
     """
     Get the current schema bundle from the schema agent.
     This is "baked in" - no need to pass it as a parameter.
     """
-    # For now, return a placeholder. Later this will read from the schema agent's output
-    # or from a shared state/cache
+    conn = db.get_connection()
+    
+    tables = conn.execute("SHOW TABLES").fetchall()
+    schema_info = {}
+    
+    for table in tables:
+        table_name = table[0]
+        schema = conn.execute(f"DESCRIBE {table_name}").fetchall()
+        schema_info[table_name] = {
+            "columns": [{"name": col[0], "type": col[1]} for col in schema]
+        }
+    
+    conn.close()
+    
     return {
-        "message_types": ["system_time", "global_position_int", "attitude"],
-        "enriched_schema": {},
-        "normalized_schema": {}
+        "message_types": [table[0] for table in tables],
+        "enriched_schema": schema_info,
+        "normalized_schema": schema_info
     }

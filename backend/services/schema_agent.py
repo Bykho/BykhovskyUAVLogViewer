@@ -81,7 +81,7 @@ def process_schema(req: SchemaRequest) -> SchemaResponse:
 
         logger.info("=== SCHEMA AGENT PROMPTING LLM ===")
         llm_response = get_openai_client().chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You summarize UAV telemetry schemas."},
                 {"role": "user", "content": llm_prompt},
