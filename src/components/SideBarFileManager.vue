@@ -52,7 +52,9 @@ export default {
             transferMessage: '',
             state: store,
             file: null,
-            uploadStarted: false
+            uploadStarted: false,
+            telemetryDataSent: false, // Flag to prevent multiple data sends
+            schemaDataSent: false // Flag to prevent multiple schema sends
         }
     },
     created () {
@@ -67,6 +69,10 @@ export default {
             worker.postMessage({ action: 'trimFile', time: this.state.timeRange })
         },
         onLoadSample (file) {
+            // Reset flags for new files
+            this.telemetryDataSent = false
+            this.schemaDataSent = false
+
             let url
             if (file === 'sample') {
                 this.state.file = 'sample'
@@ -225,6 +231,131 @@ export default {
             a.click()
             document.body.removeChild(a)
             window.URL.revokeObjectURL(url)
+        },
+        async sendSchemaData () {
+            try {
+                // Extract schema information from parsed data
+                const messageTypes = Object.keys(this.state.messages)
+                const fieldStructure = {}
+
+                // Only proceed if we have actual data
+                if (messageTypes.length === 0) {
+                    console.log('No message types to send schema for, skipping...')
+                    return
+                }
+
+                // Prevent multiple schema sends
+                if (this.schemaDataSent) {
+                    console.log('Schema data already sent, skipping...')
+                    return
+                }
+                this.schemaDataSent = true
+
+                // Build field structure for each message type
+                for (const messageType of messageTypes) {
+                    const message = this.state.messages[messageType]
+                    fieldStructure[messageType] = {
+                        fields: Object.keys(message),
+                        sampleCount: message.time_boot_ms ? message.time_boot_ms.length : 0
+                    }
+                }
+
+                const schemaData = {
+                    messageTypes: messageTypes,
+                    logType: this.state.logType,
+                    metadata: this.state.metadata,
+                    fieldStructure: fieldStructure
+                }
+
+                const response = await fetch('http://localhost:8000/schema', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(schemaData)
+                })
+
+                const result = await response.json()
+                console.log('Schema data sent:', result)
+
+                // Only send telemetry data AFTER schema is completely processed
+                if (result.status === 'ok' && Object.keys(result.normalizedSchema).length > 0) {
+                    console.log('Schema processing complete, now sending telemetry data...')
+                    await this.sendTelemetryData()
+                }
+            } catch (error) {
+                console.error('Error sending schema data:', error)
+            }
+        },
+        async sendTelemetryData () {
+            try {
+                const messageTypes = Object.keys(this.state.messages)
+                console.log(`Sending telemetry data for ${messageTypes.length} message types`)
+
+                // Only proceed if we have actual data
+                if (messageTypes.length === 0) {
+                    console.log('No message types to send, skipping...')
+                    return
+                }
+
+                // Prevent multiple data sends
+                if (this.telemetryDataSent) {
+                    console.log('Telemetry data already sent, skipping...')
+                    return
+                }
+
+                // Set flag immediately to prevent race conditions
+                this.telemetryDataSent = true
+                console.log('Starting telemetry data send...')
+
+                // Send data for each message type
+                for (const messageType of messageTypes) {
+                    const message = this.state.messages[messageType]
+                    const fields = Object.keys(message)
+                    const rowCount = message[fields[0]] ? message[fields[0]].length : 0
+
+                    // Convert message data to rows format
+                    const rows = []
+                    for (let i = 0; i < rowCount; i++) {
+                        const row = {}
+                        for (const field of fields) {
+                            // Handle undefined values and ensure we get scalar values, not arrays
+                            if (message[field] && message[field][i] !== undefined) {
+                                const value = message[field][i]
+                                // If it's still an array, take the first element
+                                row[field] = Array.isArray(value) ? value[0] : value
+                            } else {
+                                row[field] = null
+                            }
+                        }
+                        rows.push(row)
+                    }
+
+                    // Only send if we have data
+                    if (rows.length > 0) {
+                        console.log(`Sending ${rows.length} rows for ${messageType}`)
+                        console.log('Sample row:', rows[0]) // Debug: show first row structure
+
+                        // Send to backend
+                        const response = await fetch('http://localhost:8000/data', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                messageType: messageType,
+                                rows: rows
+                            })
+                        })
+
+                        const result = await response.json()
+                        console.log(`Telemetry data sent for ${messageType}:`, result)
+                    }
+                }
+                console.log('Telemetry data sending completed')
+            } catch (error) {
+                console.error('Error sending telemetry data:', error)
+            }
         }
     },
     mounted () {
@@ -248,8 +379,11 @@ export default {
             } else if (event.data.messages) {
                 this.state.messages = event.data.messages
                 this.$eventHub.$emit('messages')
+                // Don't send telemetry data here - wait for messagesDoneLoading
             } else if (event.data.messagesDoneLoading) {
                 this.$eventHub.$emit('messagesDoneLoading')
+                this.sendSchemaData()
+                // Telemetry data will be sent automatically after schema completes
             } else if (event.data.messageType) {
                 this.state.messages[event.data.messageType] = event.data.messageList
                 this.$eventHub.$emit('messages')

@@ -48,13 +48,13 @@ const devWebpackConfig = merge(baseWebpackConfig, {
       ],
     },
     hot: true,
-    static: "./",
+    static: false,
     compress: true,
     host: HOST || config.dev.host,
     port: PORT || config.dev.port,
     open: config.dev.autoOpenBrowser,
    // publicPath: config.dev.assetsPublicPath,
-    proxy: config.dev.proxyTable,
+    proxy: config.dev.proxyTable
   },
   plugins: [
     new ESLintPlugin({fix: true}),
