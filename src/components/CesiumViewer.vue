@@ -87,6 +87,14 @@ import {
 // Set Cesium token from environment variable
 Ion.defaultAccessToken = process.env.VUE_APP_CESIUM_TOKEN || ''
 
+// Log token status for debugging
+if (!process.env.VUE_APP_CESIUM_TOKEN) {
+    console.warn('⚠️ VUE_APP_CESIUM_TOKEN not found. Cesium Ion features may not work properly.')
+    console.warn('Get a free token at: https://ion.cesium.com/')
+} else {
+    console.log('✅ Cesium Ion token loaded')
+}
+
 const colorCoderMode = new ColorCoderMode(store)
 const colorCoderRange = new ColorCoderRange(store)
 
@@ -263,7 +271,7 @@ export default {
                         shadows: true,
                         // eslint-disable-next-line
                         baseLayer: new ImageryLayer.fromProviderAsync(
-                            IonImageryProvider.fromAssetId(3954)
+                            IonImageryProvider.fromAssetId(2) // Use Bing Maps Aerial imagery
                         ),
                         imageryProviderViewModels: imageryProviders,
                         orderIndependentTranslucency: false,
@@ -329,7 +337,9 @@ export default {
                 iconUrl: '/Widgets/Images/ImageryProviders/sentinel-2.png',
                 tooltip: 'Sentinel 2 Imagery',
                 creationFunction: function () {
-                    return ImageryLayer.fromProviderAsync(IonImageryProvider.fromAssetId(3812))
+                    return ImageryLayer.fromProviderAsync(
+                        IonImageryProvider.fromAssetId(2) // Use Bing Maps Aerial imagery
+                    )
                 }
             })
             imageryProviders.push(this.sentinelProvider)
@@ -604,9 +614,25 @@ export default {
         getTimeStart () {
             let date = null
             try {
-                date = JulianDate.fromDate(this.state.metadata.startTime)
+                // Ensure we have a valid Date object
+                let startTime = this.state.metadata.startTime
+                if (!startTime || !(startTime instanceof Date)) {
+                    // If startTime is not a Date, try to create one
+                    if (typeof startTime === 'string' || typeof startTime === 'number') {
+                        startTime = new Date(startTime)
+                    } else {
+                        startTime = new Date(2015, 2, 25, 16)
+                    }
+                }
+
+                // Validate the date is not invalid
+                if (isNaN(startTime.getTime())) {
+                    startTime = new Date(2015, 2, 25, 16)
+                }
+
+                date = JulianDate.fromDate(startTime)
             } catch (e) {
-                console.log(e)
+                console.log('Error creating JulianDate:', e)
                 date = JulianDate.fromDate(new Date(2015, 2, 25, 16))
             }
             return date

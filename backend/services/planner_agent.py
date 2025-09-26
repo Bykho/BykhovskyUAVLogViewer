@@ -80,6 +80,9 @@ class PlannerAgent:
     - Data Agents: Perform atomic queries or analyses on the database (SQL, computations).
     - Frontend: Displays the plan and its live updates to the user.
 
+    Keep the plan minimal, ideally 1–3 steps. If you can get the answer with 1 step, do not create a plan with more than 1 step.
+    But, if the tasks needs multiple steps, create a plan with multiple steps or add more steps to the plan once you get more information.
+
     You have access to these tools:
     - update_plan: Create or modify the execution plan
     - execute_step: Execute a single step using the executor agent

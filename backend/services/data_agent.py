@@ -141,6 +141,8 @@ Rules:
 4. Include clear variable names (e.g., `query`, `df`, `result`).
 5. The final line of code should assign the result to a variable called `result`.
 6. Do not print or log inside the generated code.
+7. You may only import: duckdb, pandas, numpy. Do not import scipy, sklearn, or any other library.
+
 
 DuckDB SQL REQUIREMENTS:
 - Only use supported aggregate functions: MIN, MAX, AVG, COUNT, SUM, STDDEV.
@@ -215,7 +217,7 @@ db_connection = duckdb.connect(":memory:")
 {generated_code}
 """
         
-        with Sandbox.create(template="base", api_key=os.getenv("E2B_API_KEY")) as sandbox:
+        with Sandbox.create(template="39lf1as0rvcg60o5u43r", api_key=os.getenv("E2B_API_KEY")) as sandbox:
             # Upload the database file to the sandbox
             sandbox.files.write("/tmp/telemetry.duckdb", open("telemetry.duckdb", "rb").read())
             
@@ -228,11 +230,7 @@ db_connection = duckdb.connect(":memory:")
             # Write the code to a file and run it
             sandbox.files.write("/tmp/analysis.py", full_code_with_print)
             
-            # Install required packages
-            install_process = sandbox.commands.run("pip install duckdb pandas")
-            if install_process.exit_code != 0:
-                logger.error(f"Package installation failed: {install_process.stderr}")
-            
+            # Run the analysis (packages are pre-installed in custom template)
             process = sandbox.commands.run("python3 /tmp/analysis.py")
             
             # Capture outputs

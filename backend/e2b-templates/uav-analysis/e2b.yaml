@@ -1,0 +1,4 @@
+name: uav-analysis
+language: python
+python: "3.11"
+requirements: requirements.txt
