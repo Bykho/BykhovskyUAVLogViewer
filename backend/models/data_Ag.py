@@ -8,3 +8,4 @@ class DataAgentResponse(BaseModel):
     errors: List[str] = []
     logs: List[str] = []
     attempts: Optional[List[Dict]] = None  # Full attempt history for debugging/planner
+    duration_sec: Optional[float] = None  # Actual execution time

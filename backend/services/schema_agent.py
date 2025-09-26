@@ -94,16 +94,17 @@ def process_schema(req: SchemaRequest) -> SchemaResponse:
         summary_text = "Summary unavailable due to LLM error."
 
     # Create database tables from schema
-    logger.info("=== CREATING DATABASE TABLES ===")
+    
+    #logger.info("=== CREATING DATABASE TABLES ===")
     db.create_tables_from_schema(normalized_schema, enriched_schema)
-    logger.info("=== DATABASE TABLES CREATED ===")
+    #logger.info("=== DATABASE TABLES CREATED ===")
 
     # Log the output for debugging
-    logger.info("=== SCHEMA AGENT SUMMARY ===")
-    logger.info(summary_text)
-    logger.info("=== ENRICHED SCHEMA ===")
-    logger.info(json.dumps(enriched_schema, indent=2))
-    logger.info("============================")
+    #logger.info("=== SCHEMA AGENT SUMMARY ===")
+    #logger.info(summary_text)
+    #logger.info("=== ENRICHED SCHEMA ===")
+    #logger.info(json.dumps(enriched_schema, indent=2))
+    #logger.info("============================")
 
     return SchemaResponse(
         status="ok",

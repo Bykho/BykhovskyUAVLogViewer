@@ -65,7 +65,6 @@ def run_agents_in_parallel(subtasks: List[dict], intent: str) -> List[AgentResul
     Returns structured results for all subtasks.
     """
     results = []
-    logger.info(f"=== DISPATCHING {len(subtasks)} DATA AGENTS IN PARALLEL ===")
     
     with ThreadPoolExecutor(max_workers=min(5, len(subtasks))) as executor:
         # Submit all tasks
@@ -77,11 +76,11 @@ def run_agents_in_parallel(subtasks: List[dict], intent: str) -> List[AgentResul
         # Collect results as they complete
         for future in as_completed(future_to_task):
             subtask = future_to_task[future]
-            start_time = time.time()
             
             try:
                 result = future.result()
-                duration = time.time() - start_time
+                # Use the actual duration from the Data Agent response
+                duration = result.duration_sec or 0.0
                 
                 agent_result = AgentResult(
                     subtask=subtask,
@@ -95,25 +94,25 @@ def run_agents_in_parallel(subtasks: List[dict], intent: str) -> List[AgentResul
                 results.append(agent_result)
                 
                 status = "✓" if result.ok else "✗"
-                logger.info(f"{status} Completed: {subtask['query'][:60]}... ({duration:.1f}s)")
+                logger.info(f"{status} {subtask['query'][:50]}... ({duration:.1f}s)")
                 
             except Exception as e:
-                duration = time.time() - start_time
+                # For exceptions, we can't get duration from the result
                 agent_result = AgentResult(
                     subtask=subtask,
                     ok=False,
                     errors=[f"Executor exception: {str(e)}"],
                     logs=[],
-                    duration_sec=duration
+                    duration_sec=0.0
                 )
                 results.append(agent_result)
-                logger.error(f"✗ Failed: {subtask['query'][:60]}... ({duration:.1f}s) - {e}")
+                logger.error(f"✗ {subtask['query'][:50]}... (0.0s) - {e}")
     
     # Sort results by subtask order for consistent output
     results.sort(key=lambda x: subtasks.index(x.subtask))
     
     success_count = sum(1 for r in results if r.ok)
-    logger.info(f"=== ROUND COMPLETE: {success_count}/{len(results)} agents succeeded ===")
+    logger.info(f"Round complete: {success_count}/{len(results)} succeeded")
     
     return results
 
@@ -152,6 +151,48 @@ def ledger_from_results(results: List[AgentResult], round_num: int) -> str:
     
     return ledger
 
+def debug_summary_from_results(results: List[AgentResult], round_num: int) -> str:
+    """
+    Build human-friendly debug summary for logs and debugging.
+    Similar to benchmark_data_agent.py output format.
+    """
+    success_count = sum(1 for r in results if r.ok)
+    total_duration = sum(r.duration_sec for r in results)
+    avg_duration = total_duration / len(results) if results else 0
+    
+    summary = f"\n{'='*60}\n"
+    summary += f"ROUND {round_num} DEBUG SUMMARY\n"
+    summary += f"{'='*60}\n"
+    summary += f"Total Agents: {len(results)}\n"
+    summary += f"Successful: {success_count}\n"
+    summary += f"Failed: {len(results) - success_count}\n"
+    summary += f"Total Duration: {total_duration:.1f}s\n"
+    summary += f"Average Duration: {avg_duration:.1f}s\n"
+    summary += f"{'='*60}\n"
+    
+    # Per-agent breakdown
+    for i, r in enumerate(results, 1):
+        status = "✓ SUCCESS" if r.ok else "✗ FAILED"
+        summary += f"\nAgent {i}: {status}\n"
+        summary += f"  Query: {r.subtask['query'][:80]}{'...' if len(r.subtask['query']) > 80 else ''}\n"
+        summary += f"  Duration: {r.duration_sec:.1f}s\n"
+        
+        if r.ok and r.data:
+            data_str = str(r.data)
+            if len(data_str) > 100:
+                data_str = data_str[:100] + "..."
+            summary += f"  Data: {data_str}\n"
+        
+        if r.errors:
+            summary += f"  Errors: {', '.join(r.errors)}\n"
+        
+        if r.executed_code:
+            code_lines = r.executed_code.count('\n') + 1
+            summary += f"  Code: {len(r.executed_code)} chars, {code_lines} lines\n"
+    
+    summary += f"\n{'='*60}\n"
+    return summary
+
 def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds: int = 3) -> dict:
     """
     Persistent Executor Agent - Owns the full lifecycle of one Planner task.
@@ -168,11 +209,7 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
     Returns:
         Structured response with full reasoning trace
     """
-    logger.info("=== PERSISTENT EXECUTOR AGENT STARTING ===")
-    logger.info(f"Task: {task_spec}")
-    logger.info(f"Intent: {intent}")
-    logger.info(f"Schema keys: {list(schema_bundle.keys()) if schema_bundle else 'None'}")
-    logger.info(f"Max rounds: {max_rounds}")
+    logger.info(f"Executor Agent: {task_spec.get('query', 'Unknown task')[:60]}...")
     
     # Initialize persistent memory
     reasoning_trace = []
@@ -183,17 +220,17 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
     
     # Main Executor loop
     for round_num in range(1, max_rounds + 1):
-        logger.info(f"=== EXECUTOR ROUND {round_num}/{max_rounds} ===")
+        logger.info(f"Round {round_num}/{max_rounds}")
         
         # 1. Plan subtasks for this round
         subtasks = plan_subtasks(task_spec, schema_bundle, intent, reasoning_trace, round_num)
-        logger.info(f"Generated {len(subtasks)} subtasks for round {round_num}")
         
         # 2. Dispatch Data Agents in parallel
         round_results = run_agents_in_parallel(subtasks, intent)
         
-        # 3. Build ledger-style summary for Executor LLM
+        # 3. Build summaries for both human debugging and LLM review
         ledger = ledger_from_results(round_results, round_num)
+        debug_summary = debug_summary_from_results(round_results, round_num)
         
         # 4. Aggregate results for persistent memory
         for result in round_results:
@@ -216,7 +253,7 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
         
         # 5. Check termination conditions
         if decision["action"] == "resolved":
-            logger.info(f"=== TASK RESOLVED IN ROUND {round_num} ===")
+            logger.info(f"Task resolved in round {round_num}")
             return {
                 "ok": True,
                 "task": task_spec,
@@ -229,7 +266,7 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
                 "iterations": round_num
             }
         elif decision["action"] == "impossible":
-            logger.info(f"=== TASK DECLARED IMPOSSIBLE IN ROUND {round_num} ===")
+            logger.info(f"Task declared impossible in round {round_num}")
             return {
                 "ok": False,
                 "task": task_spec,
@@ -243,7 +280,7 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
                 "failure_reason": decision["reasoning"]
             }
         elif round_num == max_rounds:
-            logger.info(f"=== MAX ROUNDS EXCEEDED ===")
+            logger.info(f"Max rounds exceeded")
             return {
                 "ok": False,
                 "task": task_spec,
@@ -256,9 +293,6 @@ def executor_agent(task_spec: dict, schema_bundle: dict, intent: str, max_rounds
                 "iterations": round_num,
                 "failure_reason": f"Exceeded maximum rounds ({max_rounds})"
             }
-        
-        # Continue to next round
-        logger.info(f"=== CONTINUING TO ROUND {round_num + 1} ===")
     
     # This should never be reached due to the max_rounds check above
     return {"ok": False, "error": "Unexpected end of Executor loop"}
@@ -279,41 +313,46 @@ def plan_subtasks(task_spec: dict, schema_bundle: dict, intent: str,
             previous_context += f"  Reasoning: {trace['reasoning']}\n"
     
     prompt = f"""
-You are the Executor Agent, planning subtasks for round {round_num}.
+You are an Executor Agent. Your job is to decide how to break down the given task into
+subtasks for Data Agents to run against a UAV telemetry database.
 
-Original task: {task_spec}
+Task: {task_spec}
 Intent: {intent}
-Schema available: {list(schema_bundle.get('message_types', []))}
+Schema bundle: {json.dumps(schema_bundle, indent=2)}
 
 {previous_context}
 
-Generate 2-4 specific subtasks that will help resolve the original task.
-Each subtask should be a focused query that can be executed by a Data Agent.
+Instructions:
+- If the task is a simple request (e.g., "find maximum altitude", "count GPS errors"),
+  return exactly ONE subtask that directly queries the relevant field(s).
+- If the task is broad or investigative (e.g., "provide insights", "find anomalies",
+  "compare performance"), return 2–4 subtasks that cover the main angles needed.
+- Use only the fields and tables in the schema.
+- Subtasks should be atomic, specific, and executable by a single Data Agent.
 
-Return as a JSON list of subtasks, each with:
-- "query": specific question to answer
-- "type": "analysis" or "diagnostic" 
-- "priority": "high", "medium", or "low"
+Analysis Guidelines:
+- For detection tasks (finding turns, anomalies, patterns): Plan comprehensive analysis using multiple data sources
+- For simple queries (max altitude, count records): Plan direct single queries
+- Always specify which tables/fields to analyze in subtask descriptions
 
-Focus on:
-- If round 1: break down the main task into logical components
-- If round 2+: refine based on what was learned, resolve conflicts, or fill gaps
-- Make subtasks specific and actionable
-- Avoid redundancy with previous rounds
+
+Output format (strict JSON):
+[
+  {{"query": "Subtask description", "type": "analysis|diagnostic", "priority": "low|medium|high"}}
+]
 """
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an Executor Agent that plans subtasks for UAV telemetry analysis. Return only valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000
+            max_tokens=10000
         )
         
         content = response.choices[0].message.content.strip()
-        logger.info(f"LLM response: {content[:200]}...")
         
         # Use robust JSON extraction
         subtasks = extract_json_block(content)
@@ -333,7 +372,6 @@ Focus on:
                     "priority": subtask.get("priority", "medium")
                 })
         
-        logger.info(f"Generated {len(safe_subtasks)} subtasks for round {round_num}")
         return safe_subtasks
         
     except Exception as e:
@@ -360,41 +398,77 @@ def review_and_decide(task_spec: dict, schema_bundle: dict, intent: str,
             previous_context += f"  Reasoning: {trace['reasoning']}\n"
     
     prompt = f"""
-You are the Executor Agent. Review the round's ledger of Data Agent results below.
+
+You are the Executor Agent in a multi-agent system for analyzing UAV (unmanned aerial vehicle) flight logs.
+
+The system has multiple roles:
+
+- Planner Agent: Creates and manages the execution plan at the semantic level.
+- Executor Agent (you): Takes one step from the plan, breaks it into subtasks, dispatches Data Agents, and decides when the task is resolved.
+- Data Agents: Perform atomic queries or computations against the telemetry database. They may succeed or fail, and may return partial or conflicting results.
+- Frontend: Displays the evolving plan and Executor decisions to the user.
+
+You do not invent plans yourself. You focus only on executing the current task passed from the Planner and deciding when it is resolved.
+
+Context provided:
 
 Original Task: {task_spec}
 Intent: {intent}
+Schema bundle: {json.dumps(schema_bundle, indent=2)}
 
+=== CURRENT ROUND RESULTS (Ledger) ===
 {ledger}
 
+=== PREVIOUS ROUNDS HISTORY ===
 {previous_context}
 
-Your job:
-- Decide if the task is RESOLVED, needs to CONTINUE, or is IMPOSSIBLE.
-- If resolved, provide the final_data.
-- If continue, explain what new subtasks are needed next round.
-- If impossible, explain why.
+Responsibilities
+- Interpret the task_spec and intent: understand what outcome the Planner expects from this step.
+- Review the ledger of Data Agent results: check if outputs are valid, consistent, and sufficient to answer the task.
+- Decide on next action:
+  - "resolved": Task is complete and final_data is available.
+  - "continue": More subtasks are needed. Specify them clearly so they can be dispatched next round.
+  - "impossible": Task cannot be completed given the available data; explain why.
+- Provide transparent reasoning for your decision, so the Planner can understand why you resolved, continued, or declared impossible.
 
-Respond in JSON:
+Never generate SQL or code — only decide what subtasks are needed and whether the task is complete.
+
+Output format (strict JSON)
+
 {{
   "action": "resolved" | "continue" | "impossible",
-  "reasoning": "...",
-  "final_data": ... (only if resolved)
+  "reasoning": "Explanation of your decision and how you interpreted the Data Agent results",
+  "final_data": ... (only if action = "resolved")
 }}
-"""
+
+Resolution Criteria:
+- "resolved": All subtasks succeeded AND results directly answer the original task
+- "continue": Results are incomplete, contradictory, or need additional analysis  
+- "impossible": Data unavailable or subtasks consistently failing
+
+For detection tasks, empty results require additional validation before declaring "resolved"
+
+Rules
+
+Always base your decision on the ledger of actual Data Agent results.
+If continuing, propose specific subtasks (not vague goals) that would bring the task closer to resolution.
+If resolved, include the final_data in a concise, structured format.
+If impossible, give a clear reason (e.g., missing schema fields, data absent, inconsistent results).
+
+Return only valid JSON in the exact format."""
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an Executor Agent that reviews results and makes decisions. Return only valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000
+            max_tokens=10000
         )
         
         content = response.choices[0].message.content.strip()
-        logger.info(f"LLM response: {content[:200]}...")
+        logger.info(f"Executor thinking: {content}")
         
         # Use robust JSON extraction
         decision = extract_json_block(content)
@@ -413,7 +487,6 @@ Respond in JSON:
         reasoning = decision.get("reasoning", "No reasoning provided")
         final_data = decision.get("final_data")
         
-        logger.info(f"Round {round_num} decision: {action} - {reasoning}")
         return {
             "action": action,
             "reasoning": reasoning,

@@ -50,7 +50,7 @@ def create_tables_from_schema(normalized_schema: Dict[str, Any],
             col_defs.append(f"{field} {duck_type}")
         
         create_stmt = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
-        logger.info(f"Executing: {create_stmt}")
+        #logger.info(f"Executing: {create_stmt}")
         conn.execute(create_stmt)
     
     conn.close()
@@ -67,16 +67,16 @@ def insert_rows(table: str, rows: List[Dict[str, Any]]):
     insert_stmt = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
     
     # Debug: log the first row to see data types
-    logger.info(f"Sample row for {table}: {rows[0]}")
+    # logger.info(f"Sample row for {table}: {rows[0]}")
     
     try:
         values = [tuple(row[col] for col in columns) for row in rows]
         conn.executemany(insert_stmt, values)
         conn.close()
-        logger.info(f"Inserted {len(rows)} rows into {table}")
+        #logger.info(f"Inserted {len(rows)} rows into {table}")
         return len(rows)
     except Exception as e:
-        logger.error(f"Error inserting rows into {table}: {e}")
+        #logger.error(f"Error inserting rows into {table}: {e}")
         conn.close()
         raise
 

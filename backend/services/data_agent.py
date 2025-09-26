@@ -6,9 +6,14 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from e2b import Sandbox
 import os
+import time
 
 # Load environment variables
 load_dotenv()
+
+# Suppress verbose E2B HTTP logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("e2b").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -20,34 +25,27 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
     Self-healing Data Agent with LLM-driven retry loop.
     Attempts to generate and execute code, with LLM-guided repair on failures.
     """
+    # Start timing the entire execution
+    start_time = time.time()
+    
     # Get schema bundle and DB connection "baked in" automatically
     schema_bundle = get_schema_bundle()
     db_connection = db.get_connection()
     
-    # Log all inputs clearly for debugging
-    logger.info("=== DATA AGENT INPUTS ===")
-    logger.info(f"Task Spec: {task_spec}")
-    #logger.info(f"Schema Bundle Keys: {list(schema_bundle.keys()) if schema_bundle else 'None'}")
-    #logger.info(f"DB Connection Type: {type(db_connection).__name__}")
-    logger.info(f"Intent: {intent}")
-    logger.info("=========================")
+    # Log inputs concisely
+    logger.info(f"Data Agent: {task_spec.get('query', 'Unknown task')[:60]}...")
     
     # Self-healing retry loop
     attempts = []
     max_retries = 3
     
     for attempt_num in range(1, max_retries + 1):
-        logger.info(f"=== ATTEMPT {attempt_num}/{max_retries} ===")
-        
         try:
             # Generate code using LLM
             if attempt_num == 1:
-                # First attempt: normal code generation
-                logger.info("=== CALLING LLM FOR INITIAL CODE GENERATION ===")
                 prompt = build_initial_prompt(schema_bundle, task_spec, intent)
             else:
                 # Repair attempt: ask LLM to fix code based on previous error
-                logger.info("=== CALLING LLM FOR CODE REPAIR ===")
                 last_attempt = attempts[-1]
                 prompt = build_repair_prompt(
                     schema_bundle, task_spec, intent,
@@ -65,7 +63,6 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
             )
             
             generated_code = response.choices[0].message.content.strip()
-            logger.info(f"Generated code (attempt {attempt_num}): {generated_code[:200]}...")
             
             # Execute the generated code in E2B sandbox
             success, result_data, stdout, stderr, error_msg = execute_in_sandbox(generated_code)
@@ -82,22 +79,24 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
             attempts.append(attempt_record)
             
             if success:
+                # Calculate total execution time
+                total_duration = time.time() - start_time
+                
                 # Success! Return with attempt history for transparency
-                logger.info(f"=== SUCCESS ON ATTEMPT {attempt_num} ===")
                 return DataAgentResponse(
                     ok=True,
                     data=result_data,
                     executed_code=generated_code,
                     errors=[],
                     logs=[f"Attempt {a['attempt']}: {'Success' if a['success'] else a['error']}" for a in attempts],
-                    attempts=attempts
+                    attempts=attempts,
+                    duration_sec=total_duration
                 )
             else:
-                logger.warning(f"=== ATTEMPT {attempt_num} FAILED: {error_msg} ===")
                 if attempt_num < max_retries:
-                    logger.info(f"=== RETRYING WITH LLM REPAIR (attempt {attempt_num + 1}) ===")
+                    logger.warning(f"Attempt {attempt_num} failed, retrying...")
                 else:
-                    logger.error("=== ALL RETRIES EXHAUSTED ===")
+                    logger.error(f"All retries exhausted: {error_msg}")
         
         except Exception as e:
             logger.error(f"LLM code generation failed on attempt {attempt_num}: {e}")
@@ -111,16 +110,17 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
             }
             attempts.append(attempt_record)
     
-    # All attempts failed - return structured failure with history
-    logger.error("=== ALL RETRIES EXHAUSTED - RETURNING FAILURE ===")
-    return DataAgentResponse(
-        ok=False,
-        data=None,
-        executed_code=attempts[-1]["generated_code"] if attempts else None,
-        errors=[a["error"] for a in attempts if a["error"]],
-        logs=["All retries failed"] + [f"Attempt {a['attempt']}: {a['error']}" for a in attempts],
-        attempts=attempts
-    )
+        # All attempts failed - return structured failure with history
+        total_duration = time.time() - start_time
+        return DataAgentResponse(
+            ok=False,
+            data=None,
+            executed_code=attempts[-1]["generated_code"] if attempts else None,
+            errors=[a["error"] for a in attempts if a["error"]],
+            logs=["All retries failed"] + [f"Attempt {a['attempt']}: {a['error']}" for a in attempts],
+            attempts=attempts,
+            duration_sec=total_duration
+        )
 
 def build_initial_prompt(schema_bundle: dict, task_spec: dict, intent: str) -> str:
     """Build the initial prompt for code generation"""
@@ -141,6 +141,17 @@ Rules:
 4. Include clear variable names (e.g., `query`, `df`, `result`).
 5. The final line of code should assign the result to a variable called `result`.
 6. Do not print or log inside the generated code.
+
+DuckDB SQL REQUIREMENTS:
+- Only use supported aggregate functions: MIN, MAX, AVG, COUNT, SUM, STDDEV.
+- Do NOT use QUANTILE_DISC, PERCENTILE_DISC, or advanced window/ordered aggregate functions.
+- If you need medians or quantiles, approximate them using basic math/statistics in Python after fetching the data.
+- Always check table schema first: SELECT * FROM table LIMIT 1
+- Cast time columns if needed: CAST(time_boot_ms AS BIGINT)
+- Stick to columns listed in the schema bundle — dont invent new ones.
+
+
+Try to do full analysis on the data fields that you select to work on, dont really just analyze a single point.
 
 Inputs:
 - Schema bundle: {schema_bundle}
@@ -174,6 +185,12 @@ Schema bundle:
 Original task spec: {task_spec}
 Original intent: {intent}
 
+Please correct the SQL so it runs successfully in DuckDB. 
+- Remove any unsupported functions (e.g., QUANTILE_DISC, PERCENTILE_DISC, ordered aggregates).
+- If the query requires quantiles or medians, fetch the raw data and compute them in Python instead.
+- Use only basic DuckDB functions: MIN, MAX, AVG, COUNT, SUM, STDDEV.
+- Ensure all columns exist in the schema bundle.
+
 Please revise the code so it will run successfully in DuckDB while preserving the intent.
 Only output corrected Python code (no explanations, no Markdown, no extra text).
 """
@@ -185,8 +202,6 @@ def execute_in_sandbox(generated_code: str) -> tuple[bool, Any, str, str, str]:
     Returns: (success, result_data, stdout, stderr, error_msg)
     """
     try:
-        logger.info("=== EXECUTING CODE IN E2B SANDBOX ===")
-        
         # Prepare the code with database connection setup
         full_code = f"""
 import duckdb
@@ -223,10 +238,6 @@ db_connection = duckdb.connect(":memory:")
             # Capture outputs
             stdout = process.stdout
             stderr = process.stderr
-            
-            logger.info(f"E2B stdout: {stdout}")
-            if stderr:
-                logger.error(f"E2B stderr: {stderr}")
             
             # Check if execution was successful
             if process.exit_code == 0:
