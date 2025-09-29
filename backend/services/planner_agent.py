@@ -82,6 +82,7 @@ class PlannerAgent:
 
     Keep the plan minimal, ideally 1–3 steps. If you can get the answer with 1 step, do not create a plan with more than 1 step.
     But, if the tasks needs multiple steps, create a plan with multiple steps or add more steps to the plan once you get more information.
+    ALSO THE PLAN SHOULD CONSIST OF LIKE BROAD SEMANTIC STEPS. NOT REALLY SPECIFIC ON THE DATA. EACH STEP IN THE PLAN GETS HANDED OFF TO THE EXECUTOR AGENT.
 
     You have access to these tools:
     - update_plan: Create or modify the execution plan
@@ -101,6 +102,15 @@ class PlannerAgent:
     4. Adapt the plan based on results by calling update_plan again if needed
     5. Provide a final comprehensive answer
 
+    When the Executor finishes a step, it will return a detailed report
+    including: final_data, reasoning_trace, executed_code, errors, and iterations.
+    Use this information to:
+    - Decide if the step resolved the user’s question or if more steps are needed
+    - Adjust future steps if errors occurred or if the Executor struggled
+    - Include Executor reasoning and executed_code summaries in your final answer for transparency
+
+    
+
     Use broadcast_status sparingly for brief explanations of your reasoning:
     - "Checking GPS data for alt readings..."
     - "Found multiple alt sources, comparing values..."
@@ -115,9 +125,16 @@ class PlannerAgent:
     - Keep plan steps semantic and high-level
     - Always broadcast plan updates so the frontend stays current
     - Execute steps sequentially and adapt based on results
-    - Provide clear, comprehensive final answers"""
+    - Provide clear, comprehensive final answers
+    
+    When you call execute_step, also provide a detailed intent explaining why this step matters, what its scope is, and what outcome is expected. 
+    Think of it as briefing the Executor so it shares your reasoning. Please construct a natural language intent that includes four layers: 
+    high-level purpose (why the user wants this), role of this step (how it contributes to the plan), expected outcome (what success looks like), 
+    and scope/constraints (what to focus on and ignore)."""
 
 
+    # This method serves as the main entry point for generating a planner agent response to a user's message.
+    # It initiates a continuous conversation loop with tool access, handling plan creation, step execution, and broadcasting updates.
     async def generate_response(self, user_message: str, broadcast_callback=None) -> str:
         """Generate a planner response using continuous conversation with tools"""
         logger.info(f"Planner Agent processing: {user_message}")
@@ -132,17 +149,20 @@ class PlannerAgent:
         return response
 
 
-
+    # Continuous conversation is an iterative loop where the planner agent interacts with the LLM, 
+    # invoking tools (like plan updates, step execution, and status broadcasts) as needed to fulfill the user's request. 
+    # This approach enables dynamic, adaptive planning and execution by allowing the agent to reason, update its plan, 
+    # and respond to results in real time, ensuring a flexible and robust workflow.
     async def _continuous_conversation(self, user_message: str) -> str:
         """Continuous conversation with tool access"""
-        
-        # Define tools for the LLM
+
+        # Define tools for the LLM: update_plan, execute_step, broadcast_status
         tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "update_plan",
-                    "description": "Update the current plan with new steps",
+                    "description": "Update the current plan with new steps. IDs will be auto-generated.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -151,11 +171,10 @@ class PlannerAgent:
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "id": {"type": "integer"},
                                         "text": {"type": "string"},
                                         "status": {"type": "string", "enum": ["pending", "active", "done", "failed"]}
                                     },
-                                    "required": ["id", "text", "status"]
+                                    "required": ["text", "status"]
                                 }
                             }
                         },
@@ -167,13 +186,13 @@ class PlannerAgent:
                 "type": "function", 
                 "function": {
                     "name": "execute_step",
-                    "description": "Execute a single step using the executor agent",
+                    "description": "Execute a single step using the executor agent. Pass the step ID from the current plan.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "step_description": {"type": "string"}
+                            "step_id": {"type": "integer", "description": "The numeric ID of the step from the plan"}
                         },
-                        "required": ["step_description"]
+                        "required": ["step_id"]
                     }
                 }
             },
@@ -209,18 +228,17 @@ class PlannerAgent:
         messages = self.conversation_history.copy()
         
         # Conversation loop
-        max_iterations = 10
+        max_iterations = 20
         for iteration in range(max_iterations):
             try:
                 logger.info(f"Conversation iteration {iteration + 1}/{max_iterations}")
                 
                 response = client.chat.completions.create(
-                    model="gpt-4o",
+                    model="gpt-4.1-mini",
                     messages=messages,
                     tools=tools,
-                    tool_choice="auto",
-                    temperature=0.1
-                )
+                    tool_choice="auto"
+                    )
                 
                 message = response.choices[0].message
                 logger.info(f"LLM response - has tool calls: {bool(message.tool_calls)}")
@@ -275,10 +293,10 @@ class PlannerAgent:
                                         result = "Error: Missing 'steps' parameter for update_plan"
                                         
                                 elif function_name == "execute_step":
-                                    if "step_description" in function_args:
-                                        result = await self.execute_step(function_args["step_description"])
+                                    if "step_id" in function_args:
+                                        result = await self.execute_step(function_args["step_id"])
                                     else:
-                                        result = "Error: Missing 'step_description' parameter for execute_step"
+                                        result = "Error: Missing 'step_id' parameter for execute_step"
                                         
                                 elif function_name == "broadcast_status":
                                     if "message" in function_args:
@@ -299,7 +317,7 @@ class PlannerAgent:
                             messages.append(tool_message)
                             self.conversation_history.append(tool_message)
                             
-                            logger.info(f"Tool {function_name} result: {str(result)[:100]}...")
+                            logger.info(f"Tool {function_name} result: {str(result)}...")
                             
                         except Exception as tool_error:
                             logger.error(f"Error executing tool {tool_call.function.name}: {tool_error}")
@@ -334,9 +352,40 @@ class PlannerAgent:
         logger.warning(f"Conversation reached maximum iterations ({max_iterations})")
         return "Analysis incomplete - maximum iterations reached. Please try asking a simpler question or break your request into smaller parts."
 
+    def _generate_intent_briefing(self, step_description: str, user_query: str, step_id: int) -> str:
+        """Generate rich but lightweight intent briefing for Executor"""
+        briefing = {
+            "conversation": self._extract_conversation_context(),
+            "previous_results": self._get_previous_step_context(step_id),
+            "planner_reasoning": step_description,   # this is the Planner's own reasoning
+            "execute": step_description,
+            "step_linkage": f"Step {step_id} connects prior context to this action"
+        }
+        return json.dumps(briefing, indent=2)
+    
+    def _extract_conversation_context(self) -> str:
+        """Extract user's deeper intent from conversation history"""
+        user_messages = [msg for msg in self.conversation_history if msg.get("role") == "user"]
+        if len(user_messages) > 1:
+            return f"User's evolving intent: {user_messages[-1].get('content', '')}"
+        return ""
+    
+    def _get_previous_step_context(self, current_step_id: int) -> str:
+        """Get context from previous step results"""
+        if current_step_id > 1 and self.collected_results:
+            last_result = self.collected_results[-1]
+            return f"From step {current_step_id - 1}: {last_result.get('data', 'No data')}..."
+        return ""
+    
+    def _split_step_description(self, step_text: str) -> tuple:
+        """Split step description into reasoning and action components"""
+        # For now, treat the entire step text as both reasoning and action
+        # This can be enhanced later to parse structured step descriptions
+        return step_text, step_text
+    
 
-        
-        
+
+
     def get_current_plan(self) -> List[Dict[str, Any]]:
         """Get the current plan"""
         return self.current_plan.copy()
@@ -353,133 +402,110 @@ class PlannerAgent:
 
     async def update_plan(self, steps: List[Dict[str, Any]]) -> str:
         """Tool: Update the current plan with new steps"""
-        self.current_plan = steps.copy()
-        if steps:
-            self.plan_id_counter = max(step.get('id', 0) for step in steps)
-        else:
-            self.plan_id_counter = 0
-            
-        # IMMEDIATE broadcast instead of pending
+        # DON'T reset counter - just keep incrementing
+        new_steps = []
+        
+        for step in steps:
+            self.plan_id_counter += 1  # Keeps going: 1,2,3 then 4,5,6 etc
+            new_steps.append({
+                "id": self.plan_id_counter,
+                "text": step["text"],
+                "status": step.get("status", "pending")
+            })
+        
+        self.current_plan = new_steps
+        
         if self.broadcast_callback:
             await self.broadcast_callback()
         
-        logger.info(f"Plan updated with {len(steps)} steps: {[step['text'] for step in steps]}")
-        return f"Plan updated with {len(steps)} steps. Current plan: {[step['text'] + ' (' + step['status'] + ')' for step in steps]}"
+        logger.info(f"Plan updated with {len(new_steps)} steps: {[step['text'] for step in new_steps]}")
+        plan_summary = [f"ID {step['id']}: {step['text']} ({step['status']})" for step in new_steps]
+        return f"Plan updated with {len(new_steps)} steps. Current plan: {plan_summary}"
 
 
-    async def execute_step(self, step_description: str) -> str:
+    async def execute_step(self, step_id: int) -> str:
         """Tool: Execute a single step using the executor agent"""
-        logger.info(f"Executing step: {step_description}")
-        
-        # Track step failures
+        logger.info(f"Executing step ID: {step_id}")
+
+        # Track step failures by ID
         if not hasattr(self, '_step_failures'):
             self._step_failures = {}
+        self._step_failures[step_id] = self._step_failures.get(step_id, 0) + 1
 
-        step_key = step_description
-        self._step_failures[step_key] = self._step_failures.get(step_key, 0) + 1
-
-        if self._step_failures[step_key] >= 2:
-            # Skip failed steps instead of infinite retry
-            for step in self.current_plan:
-                if step["text"] == step_description:
-                    step["status"] = "failed"
-                    break
+        if self._step_failures[step_id] >= 2:
+            step_obj = next((s for s in self.current_plan if s["id"] == step_id), None)
+            if step_obj:
+                step_obj["status"] = "failed"
             if self.broadcast_callback:
                 await self.broadcast_callback()
             return "Step failed twice - moving to next step"
-        
-        # Find and update the step status to active
-        step_found = False
-        for step in self.current_plan:
-            if step["text"] == step_description:
-                step["status"] = "active"
-                step_found = True
-                break
-        
-        if not step_found:
-            logger.warning(f"Step not found in plan: {step_description}")
-        
-        # IMMEDIATE broadcast of active status
+
+        # Find the step by ID
+        step_obj = next((s for s in self.current_plan if s["id"] == step_id), None)
+        if not step_obj:
+            logger.warning(f"Step ID not found in plan: {step_id}")
+            return f"Error: Step ID {step_id} not found in plan"
+
+        # Mark active
+        step_obj["status"] = "active"
         if self.broadcast_callback:
             await self.broadcast_callback()
-        
+
         try:
             schema_bundle = get_schema_bundle()
             if not schema_bundle:
-                # Update step to failed
-                for step in self.current_plan:
-                    if step["text"] == step_description:
-                        step["status"] = "failed"
-                        break
-                # IMMEDIATE broadcast of failure
+                step_obj["status"] = "failed"
                 if self.broadcast_callback:
                     await self.broadcast_callback()
                 return "Error: No schema available - cannot execute without data context"
-            
-            # Create task spec for executor
+
+            # Build task spec
+            reasoning, action = self._split_step_description(step_obj["text"])
             task_spec = {
-                "query": step_description,
-                "type": "analysis", 
+                "query": action,
+                "type": "analysis",
                 "priority": "medium"
             }
 
+            # Get most recent user query
+            current_user_query = next(
+                (msg.get("content", "Unknown query") for msg in reversed(self.conversation_history) if msg.get("role") == "user"),
+                "Unknown query"
+            )
 
-            current_user_query = "Unknown query"
-            step_id = None
+            # Build intent briefing
+            intent = self._generate_intent_briefing(step_obj["text"], current_user_query, step_id)
+            logger.debug("Here is the intent: " + intent)
 
-            # Get the most recent user message
-            for msg in reversed(self.conversation_history):
-                if msg.get("role") == "user":
-                    current_user_query = msg.get("content", "Unknown query")
-                    break
-
-            # Find step ID
-            for i, step in enumerate(self.current_plan):
-                if step["text"] == step_description:
-                    step_id = step.get("id", i + 1)
-                    break
-
-            intent = f"user_query: {current_user_query}, analysis_scope: comprehensive, step_context: this is step {step_id} of {len(self.current_plan)} in the plan"
-
-
-
-            # Call executor agent (wrap to prevent blocking the event loop)
+            # Call executor agent
             result = await asyncio.get_event_loop().run_in_executor(
                 None, executor_agent, task_spec, schema_bundle, intent
             )
-            
-            # Update step status based on result
-            for step in self.current_plan:
-                if step["text"] == step_description:
-                    step["status"] = "done" if result.get("ok", False) else "failed"
-                    break
-            
-            # IMMEDIATE broadcast of completion status
+
+            # Update status
+            step_obj["status"] = "done" if result.get("ok", False) else "failed"
             if self.broadcast_callback:
                 await self.broadcast_callback()
-            
+
             if result.get("ok", False):
-                # Store results for final synthesis
                 if "final_data" in result:
                     self.collected_results.append({
-                        "step": step_description,
-                        "data": result["final_data"]
+                        "step": step_obj["text"],
+                        "data": result.get("final_data", "No data"),
+                        "executor_reasoning": result.get("reasoning_trace", []),
+                        "errors": result.get("errors", []),
+                        "executed_code": result.get("executed_code", []),
+                        "iterations": result.get("iterations", 1)
                     })
-                
-                logger.info(f"Step completed successfully: {step_description}")
+                logger.info(f"Step completed successfully: {step_obj['text']}")
                 return f"Step executed successfully. Results: {result.get('final_data', 'No data returned')}"
             else:
-                logger.error(f"Step failed: {step_description} - {result.get('error', 'Unknown error')}")
+                logger.error(f"Step failed: {step_obj['text']} - {result.get('error', 'Unknown error')}")
                 return f"Step execution failed: {result.get('error', 'Unknown error')}"
-                
+
         except Exception as e:
             logger.error(f"Error executing step: {e}")
-            # Update step to failed
-            for step in self.current_plan:
-                if step["text"] == step_description:
-                    step["status"] = "failed"
-                    break
-            # IMMEDIATE broadcast of error status
+            step_obj["status"] = "failed"
             if self.broadcast_callback:
                 await self.broadcast_callback()
             return f"Step execution error: {str(e)}"
