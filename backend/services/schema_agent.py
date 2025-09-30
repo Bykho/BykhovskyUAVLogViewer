@@ -100,11 +100,11 @@ def process_schema(req: SchemaRequest) -> SchemaResponse:
     #logger.info("=== DATABASE TABLES CREATED ===")
 
     # Log the output for debugging
-    #logger.info("=== SCHEMA AGENT SUMMARY ===")
-    #logger.info(summary_text)
-    #logger.info("=== ENRICHED SCHEMA ===")
-    #logger.info(json.dumps(enriched_schema, indent=2))
-    #logger.info("============================")
+    logger.info("=== SCHEMA AGENT SUMMARY ===")
+    logger.info(summary_text)
+    logger.info("=== ENRICHED SCHEMA ===")
+    logger.info(json.dumps(enriched_schema, indent=2))
+    logger.info("============================")
 
     return SchemaResponse(
         status="ok",

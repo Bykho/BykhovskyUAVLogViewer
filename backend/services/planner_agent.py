@@ -6,7 +6,7 @@ import json
 import json_repair
 import asyncio
 from dotenv import load_dotenv
-from services.executor_agent import executor_agent
+from services.executor_agent_v2 import execute_task_v2
 from services.data_agent import get_schema_bundle
 
 # Load environment variables
@@ -479,7 +479,7 @@ class PlannerAgent:
 
             # Call executor agent
             result = await asyncio.get_event_loop().run_in_executor(
-                None, executor_agent, task_spec, schema_bundle, intent
+                None, execute_task_v2, task_spec, schema_bundle, intent
             )
 
             # Update status

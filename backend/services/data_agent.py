@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from e2b import Sandbox
 import os
 import time
-
+import json
 # Load environment variables
 load_dotenv()
 
@@ -59,7 +59,7 @@ def run_data_agent(task_spec: dict, intent: str) -> DataAgentResponse:
                     {"role": "system", "content": "You generate executable code for UAV telemetry analysis. You are a code generator. Always return runnable Python code only. No explanations, no formatting, no extra text."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=2000
+                max_tokens=5000
             )
             
             generated_code = response.choices[0].message.content.strip()
@@ -259,28 +259,46 @@ db_connection = duckdb.connect(":memory:")
         logger.error(f"E2B execution failed: {e}")
         return False, None, "", "", f"E2B execution failed: {str(e)}"
 
-
 def get_schema_bundle() -> dict:
-    """
-    Get the current schema bundle from the schema agent.
-    This is "baked in" - no need to pass it as a parameter.
-    """
+    """Get enriched schema with descriptions, units, field metadata"""
     conn = db.get_connection()
     
+    try:
+        # Retrieve enriched schema from metadata table
+        result = conn.execute(
+            "SELECT value FROM __metadata__ WHERE key = 'enriched_schema'"
+        ).fetchone()
+        
+        if result:
+            schema_data = json.loads(result[0])
+            conn.close()  # Close AFTER using the data
+            return schema_data
+    except Exception as e:
+        logger.warning(f"Could not load enriched schema from metadata: {e}")
+    finally:
+        # Ensure connection is closed even on error
+        try:
+            conn.close()
+        except:
+            pass
+    
+    # Fallback: basic schema without enrichment
+    conn = db.get_connection()  # NEW connection for fallback
     tables = conn.execute("SHOW TABLES").fetchall()
     schema_info = {}
     
     for table in tables:
         table_name = table[0]
+        if table_name.startswith("__"):
+            continue
         schema = conn.execute(f"DESCRIBE {table_name}").fetchall()
         schema_info[table_name] = {
             "columns": [{"name": col[0], "type": col[1]} for col in schema]
         }
     
     conn.close()
-    
     return {
-        "message_types": [table[0] for table in tables],
+        "message_types": list(schema_info.keys()),
         "enriched_schema": schema_info,
         "normalized_schema": schema_info
     }

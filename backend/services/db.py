@@ -1,6 +1,7 @@
 import duckdb
 import logging
 from typing import Dict, Any, List
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,14 @@ def create_tables_from_schema(normalized_schema: Dict[str, Any],
         create_stmt = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
         #logger.info(f"Executing: {create_stmt}")
         conn.execute(create_stmt)
+
+
+    conn.execute("CREATE TABLE IF NOT EXISTS __metadata__ (key TEXT, value TEXT)")
+    conn.execute("DELETE FROM __metadata__ WHERE key = 'enriched_schema'")
+    conn.execute(
+        "INSERT INTO __metadata__ VALUES (?, ?)",
+        ['enriched_schema', json.dumps(enriched_schema)]
+    )
     
     conn.close()
     logger.info(f"Database schema created at {DB_PATH}")
