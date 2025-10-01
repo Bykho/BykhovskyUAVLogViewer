@@ -354,7 +354,7 @@ export default {
 
 h4 {
     margin-bottom: 15px;
-    color: #333;
+    color: white;
 }
 
 /* Chat Interface Styles */
