@@ -4,64 +4,65 @@
 
 A JavaScript-based log viewer for MAVLink telemetry and dataflash logs with an LLM-enabled analysis system that understands and answers questions about your flight data.
 
+# UAV Log Viewer with Intelligent Analysis
 
-System Architecture
+A JavaScript-based log viewer for MAVLink telemetry and dataflash logs with an AI-powered analysis system that understands and answers questions about your flight data.
+
+## System Architecture
+
 This project uses a multi-agent AI system to analyze UAV telemetry data:
-Agent Hierarchy
+
+### Agent Hierarchy
 User Query
-    ↓
+↓
 Planner Agent (Orchestration)
-    ↓
+↓
 Executor Agent (Reasoning)
-    ↓
+↓
 Data Agents (Parallel Execution)
-    ↓
+↓
 Database (Flight Data)
 
-How It Works
-1. Data Setup
+### How It Works
 
-User uploads flight log file (.tlog or dataflash)
-Schema Agent analyzes log structure and enriches it with field meanings from MAVLink documentation
-System creates a database with telemetry data and metadata about what each field represents (units, types, descriptions)
+**1. Data Setup**
+- User uploads flight log file (.tlog or dataflash)
+- **Schema Agent** analyzes log structure and enriches it with field meanings from MAVLink documentation
+- System creates a database with telemetry data and metadata about what each field represents (units, types, descriptions)
 
-2. Question Answering
+**2. Question Answering**
+- User asks a natural language question (e.g., "What was the maximum altitude?")
+- **Planner Agent** receives the query and enriched schema, then creates a high-level analysis plan
+- **Executor Agent** uses meta-reasoning to form hypotheses, plan subtasks, and dispatch specialized agents
+- **Data Agents** generate and execute Python code in isolated sandboxes to query the database
+- Results flow back up through the hierarchy to answer the user's question
 
-User asks a natural language question (e.g., "What was the maximum altitude?")
-Planner Agent receives the query and enriched schema, then creates a high-level analysis plan
-Executor Agent uses meta-reasoning to form hypotheses, plan subtasks, and dispatch specialized agents
-Data Agents generate and execute Python code in isolated sandboxes to query the database
-Results flow back up through the hierarchy to answer the user's question
+### Key Features
 
-Key Features
+- **Schema enrichment**: Automatically understands field meanings, units (mm, rad, degE7), and relationships
+- **Intelligent reasoning**: Executor forms hypotheses and adapts strategy based on results
+- **Self-healing execution**: Data agents retry with error correction if queries fail
+- **Parallel execution**: Multiple data agents run simultaneously for complex analyses
+- **Tool-based architecture**: Agents use function calling to control their own workflow
 
-Schema enrichment: Automatically understands field meanings, units (mm, rad, degE7), and relationships
-Intelligent reasoning: Executor forms hypotheses and adapts strategy based on results
-Self-healing execution: Data agents retry with error correction if queries fail
-Parallel execution: Multiple data agents run simultaneously for complex analyses
-Tool-based architecture: Agents use function calling to control their own workflow
+### Technology Stack
 
-Technology Stack
-Frontend: Vue.js, Cesium for 3D visualization
-Backend:
+**Frontend**: Vue.js, Cesium for 3D visualization
 
-FastAPI (Python)
-OpenAI API
-DuckDB (embedded analytics database)
-E2B (code execution sandboxes)
+**Backend**: 
+- FastAPI (Python)
+- OpenAI GPT models (GPT-4o for reasoning, GPT-4.1-mini for execution)
+- DuckDB (embedded analytics database)
+- E2B (code execution sandboxes)
 
-Agent Framework:
-
-Planner: Creates semantic execution plans
-Executor: Meta-cognitive reasoning with hypothesis formation
-Data Agents: Code generation and execution
-Schema Agent: Field enrichment with MAVLink reference data
-
-
+**Agent Framework**:
+- Planner: Creates semantic execution plans
+- Executor: Meta-cognitive reasoning with hypothesis formation
+- Data Agents: Code generation and execution
+- Schema Agent: Field enrichment with MAVLink reference data
 
 ## Build Setup
-
-``` bash
+```bash
 # initialize submodules
 git submodule update --init --recursive
 
@@ -85,29 +86,3 @@ npm run e2e
 
 # run all tests
 npm test
-```
-
-# Docker
-
-run the prebuilt docker image:
-
-``` bash
-docker run -p 8080:8080 -d ghcr.io/ardupilot/uavlogviewer:latest
-
-```
-
-or build the docker file locally:
-
-``` bash
-
-# Build Docker Image
-docker build -t <your username>/uavlogviewer .
-
-# Run Docker Image
-docker run -e VUE_APP_CESIUM_TOKEN=<Your cesium ion token> -it -p 8080:8080 -v ${PWD}:/usr/src/app <your username>/uavlogviewer
-
-# Navigate to localhost:8080 in your web browser
-
-# changes should automatically be applied to the viewer
-
-```
