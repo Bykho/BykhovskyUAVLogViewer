@@ -13,21 +13,13 @@ A JavaScript-based log viewer for MAVLink telemetry and dataflash logs with an A
 This project uses a multi-agent AI system to analyze UAV telemetry data:
 
 ### Agent Hierarchy
-User Query
-↓
-Planner Agent (Orchestration)
-↓
-Executor Agent (Reasoning)
-↓
-Data Agents (Parallel Execution)
-↓
-Database (Flight Data)
+Schema Agent => User Query => Planner Agent (Orchestration) => Executor Agent (Reasoning) => Data Agents (Parallel Execution) => Database (Flight Data)
 
 ### How It Works
 
 **1. Data Setup**
 - User uploads flight log file (.tlog or dataflash)
-- **Schema Agent** analyzes log structure and enriches it with field meanings from MAVLink documentation
+- **Schema Agent** analyzes log structure and enriches it with field meanings from MAVLink/Ardupilot online documentation
 - System creates a database with telemetry data and metadata about what each field represents (units, types, descriptions)
 
 **2. Question Answering**
@@ -51,7 +43,7 @@ Database (Flight Data)
 
 **Backend**: 
 - FastAPI (Python)
-- OpenAI GPT models (GPT-4o for reasoning, GPT-4.1-mini for execution)
+- OpenAI models GPT-family
 - DuckDB (embedded analytics database)
 - E2B (code execution sandboxes)
 
