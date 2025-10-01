@@ -82,7 +82,7 @@ npm test
 
 ## Backend Setup
 
-bash# navigate to backend directory
+# navigate to backend directory
 cd backend
 
 # install Python dependencies
