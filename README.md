@@ -78,3 +78,19 @@ npm run e2e
 
 # run all tests
 npm test
+
+
+## Backend Setup
+
+bash# navigate to backend directory
+cd backend
+
+# install Python dependencies
+pip install -r requirements.txt
+
+# set required environment variables
+export OPENAI_API_KEY=<your OpenAI API key>
+export E2B_API_KEY=<your E2B API key>
+
+# run the backend server
+python app.py
