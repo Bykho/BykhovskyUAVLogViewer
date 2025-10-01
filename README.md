@@ -53,7 +53,7 @@ Schema Agent => User Query => Planner Agent (Orchestration) => Executor Agent (R
 - Data Agents: Code generation and execution
 - Schema Agent: Field enrichment with MAVLink reference data
 
-![System Archetecture](src/assets/UAVLoggerDiagram _ Mermaid Chart-2025-10-01-004057.png)
+![System Archetecture](src/assets/systemArch.png)
 
 
 ## Build Setup
