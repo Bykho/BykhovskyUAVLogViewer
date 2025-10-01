@@ -53,6 +53,8 @@ Schema Agent => User Query => Planner Agent (Orchestration) => Executor Agent (R
 - Data Agents: Code generation and execution
 - Schema Agent: Field enrichment with MAVLink reference data
 
+**Multi-Agent FLow Diagram**
+
 ![System Archetecture](src/assets/systemArch.png)
 
 
