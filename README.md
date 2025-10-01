@@ -18,8 +18,8 @@ Schema Agent => User Query => Planner Agent (Orchestration) => Executor Agent (R
 ### How It Works
 
 **1. Data Setup**
-- User uploads flight log file (.tlog or dataflash)
-- **Schema Agent** analyzes log structure and enriches it with field meanings from MAVLink/Ardupilot online documentation
+- User uploads flight log file
+- **Schema Agent** analyzes log structure and enriches it with field meanings from MAVLink/Ardupilot online documentation (scraped using beutifulsoup)
 - System creates a database with telemetry data and metadata about what each field represents (units, types, descriptions)
 
 **2. Question Answering**
@@ -43,7 +43,7 @@ Schema Agent => User Query => Planner Agent (Orchestration) => Executor Agent (R
 
 **Backend**: 
 - FastAPI (Python)
-- OpenAI models GPT-family
+- OpenAI GPT-family
 - DuckDB (embedded analytics database)
 - E2B (code execution sandboxes)
 
